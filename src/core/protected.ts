@@ -31,7 +31,11 @@ export interface ProtectedWalkResult {
  * ones. Prunes heavy directories for performance; those are not where a user's
  * own secrets live.
  */
-export function findProtectedFiles(top: string, patterns: readonly string[]): ProtectedWalkResult {
+export function findProtectedFiles(
+  top: string,
+  patterns: readonly string[],
+  maxEntries: number = MAX_WALK_ENTRIES,
+): ProtectedWalkResult {
   const isProtected = compileGlobs(patterns);
   const paths: string[] = [];
   let visited = 0;
@@ -47,7 +51,7 @@ export function findProtectedFiles(top: string, patterns: readonly string[]): Pr
       continue;
     }
     for (const entry of entries) {
-      if (++visited > MAX_WALK_ENTRIES) {
+      if (++visited > maxEntries) {
         truncated = true;
         return { paths, truncated };
       }

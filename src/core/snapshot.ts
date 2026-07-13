@@ -13,6 +13,12 @@ import { SNAPSHOT_VERSION, type Snapshot, type SnapshotEntry } from "./types.js"
 
 const KEEP_SESSIONS = 20;
 
+/** Optional knobs for a capture. `maxProtectedWalkEntries` overrides the walk's
+ * safety cap and exists so tests can force truncation without 50k real files. */
+export interface CaptureOptions {
+  maxProtectedWalkEntries?: number;
+}
+
 /**
  * Capture the current working tree at repo top-level `top`. Pure w.r.t. the
  * filesystem except for reading; does not write anything.
@@ -21,6 +27,7 @@ export async function captureSnapshot(
   top: string,
   sessionId: string,
   config: TechyBaraConfig,
+  opts: CaptureOptions = {},
 ): Promise<Snapshot> {
   const head = await getHead(top);
   const porcelain = await getPorcelain(top);
@@ -60,9 +67,18 @@ export async function captureSnapshot(
 
   // Protected files: scan the working tree directly so gitignored secrets are
   // caught even though git never reports them. Runs regardless of degraded mode.
-  const protectedResult = await mergeProtectedFiles(top, config, entries);
+  const protectedResult = await mergeProtectedFiles(top, config, entries, opts.maxProtectedWalkEntries);
   if (protectedResult.note) {
     note = note ? `${note} ${protectedResult.note}` : protectedResult.note;
+  }
+  if (protectedResult.truncated) {
+    // The protected-path walk hit its safety cap before finishing, so some
+    // protected files may not have been inspected. Mark the whole capture
+    // partial: silence must never imply a complete protected-path check.
+    degraded = true;
+    const msg =
+      "Protected-path verification was incomplete because the repository walk exceeded the configured safety limit.";
+    note = note ? `${note} ${msg}` : msg;
   }
 
   return snapshotOf(sessionId, head, top, degraded, note, entries);
@@ -99,8 +115,9 @@ async function mergeProtectedFiles(
   top: string,
   config: TechyBaraConfig,
   entries: Record<string, SnapshotEntry>,
-): Promise<{ note?: string }> {
-  const { paths } = findProtectedFiles(top, config.protectedPaths);
+  maxWalkEntries?: number,
+): Promise<{ note?: string; truncated: boolean }> {
+  const { paths, truncated } = findProtectedFiles(top, config.protectedPaths, maxWalkEntries);
   const toHash: string[] = [];
   let note: string | undefined;
 
@@ -135,7 +152,7 @@ async function mergeProtectedFiles(
       else entries[p] = { xy: "!!", hash: sha }; // "!!" = protected, tracking state unknown
     }
   }
-  return { note };
+  return { note, truncated };
 }
 
 function snapshotOf(

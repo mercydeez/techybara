@@ -62,8 +62,23 @@ export function renderMarkdown(delta: SessionDelta, meta: ReportMeta): string {
   lines.push("");
 
   if (delta.changes.length === 0) {
-    lines.push(`No files changed during this session.`);
-    lines.push("");
+    const partial = renderOneLine(delta);
+    if (partial) {
+      // No listable changes, but the verification was partial (e.g. the
+      // protected-path walk was truncated). Say so — and why — rather than
+      // implying a clean, complete result.
+      lines.push(`**${partial}**`);
+      lines.push("");
+      if (delta.notes.length > 0) {
+        lines.push(`## Notes`);
+        lines.push("");
+        for (const note of delta.notes) lines.push(`- ${note}`);
+        lines.push("");
+      }
+    } else {
+      lines.push(`No files changed during this session.`);
+      lines.push("");
+    }
     lines.push(limitsFooter());
     return lines.join("\n") + "\n";
   }
@@ -82,7 +97,7 @@ export function renderMarkdown(delta: SessionDelta, meta: ReportMeta): string {
     }
     lines.push("");
     lines.push(`> These paths match your protected-path patterns and **differ from the`);
-    lines.push(`> session baseline**. TechyBara reports that they changed — it never reads`);
+    lines.push(`> session baseline**. TechyBara reports that they changed — it never stores`);
     lines.push(`> or displays their contents.`);
     lines.push("");
   }

@@ -10,7 +10,7 @@ import { EMPTY_TREE, diffNameStatus, getToplevel, treeHashesAt } from "../core/g
 import { compileGlobs } from "../core/glob.js";
 import { baselinePath, reportPath, reportStatePath, sessionDir } from "../core/paths.js";
 import { compileProtected } from "../core/protected.js";
-import { captureSnapshot, readSnapshot } from "../core/snapshot.js";
+import { captureSnapshot, readSnapshot, type CaptureOptions } from "../core/snapshot.js";
 import type { Snapshot } from "../core/types.js";
 import { renderMarkdown, renderOneLine } from "./render.js";
 
@@ -31,6 +31,7 @@ export async function runReport(
   cwd: string,
   sessionId: string,
   now: Date = new Date(),
+  opts: CaptureOptions = {},
 ): Promise<ReportRunResult> {
   const top = await getToplevel(cwd);
   if (!top) return { status: "not-a-repo" };
@@ -42,13 +43,13 @@ export async function runReport(
   if (!baseline) {
     // Lost or corrupt baseline: re-establish it now so the rest of the session
     // has a reference. We deliberately report nothing this turn.
-    const fresh = await captureSnapshot(top, sessionId, config);
+    const fresh = await captureSnapshot(top, sessionId, config, opts);
     mkdirSync(sessionDir(top, sessionId), { recursive: true });
     writeFileAtomic(bpath, JSON.stringify(fresh, null, 2) + "\n");
     return { status: "baseline-missing" };
   }
 
-  const current = await captureSnapshot(top, sessionId, config);
+  const current = await captureSnapshot(top, sessionId, config, opts);
   // Surface changes that were committed during the session: once committed, they
   // vanish from `git status`, so neither snapshot's dirty set contains them.
   await mergeCommittedChanges(top, baseline, current, config);
@@ -79,7 +80,11 @@ export async function runReport(
   const fingerprint = deltaFingerprint(delta);
   const statePath = reportStatePath(top, sessionId);
   const last = readLastFingerprint(statePath);
-  if (fingerprint === last) {
+  // A degraded/partial verification must surface every turn it persists —
+  // silence must always mean a complete comparison found nothing. Only an
+  // identical *complete* delta is repeat-suppressed. (The fingerprint is still
+  // refreshed so a later return to a clean, fully-verified state suppresses.)
+  if (!delta.degraded && fingerprint === last) {
     return { status: "suppressed", oneLine, markdown };
   }
 
