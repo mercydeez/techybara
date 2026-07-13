@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets/techybara.png"
   ],
   "engines": {
     "node": ">=18.3.0"
