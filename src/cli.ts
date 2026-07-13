@@ -2,6 +2,8 @@
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
 import { init } from "./init.js";
+import { defaultConfig } from "./config.js";
+import { writeBaseline } from "./core/snapshot.js";
 
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
 
@@ -49,11 +51,48 @@ export async function run(argv: readonly string[]): Promise<number> {
     case "init":
       return cmdInit(rest);
     case "snapshot":
+      return cmdSnapshot(rest);
     case "report":
     case "status":
-      // Implemented in later milestones (M2/M3/M5).
+      // Implemented in later milestones (M3/M5).
       process.stderr.write(`techybara: "${first}" is not implemented yet\n`);
       return 1;
+  }
+}
+
+function flagValue(args: readonly string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
+}
+
+/**
+ * Capture a baseline for the current session. Runs from the SessionStart hook.
+ * Always exits 0: a snapshot failure must never break the session. (Full
+ * hardening / stdin payload parsing arrives with the M5 hook adapter; for now
+ * the session id may be passed with --session for manual testing.)
+ */
+async function cmdSnapshot(args: readonly string[]): Promise<number> {
+  try {
+    const sessionId = flagValue(args, "--session") ?? "manual";
+    const outcome = await writeBaseline(process.cwd(), sessionId, defaultConfig());
+    switch (outcome.status) {
+      case "written": {
+        const n = Object.keys(outcome.snapshot.entries).length;
+        const suffix = outcome.snapshot.degraded ? " (status-only, caps hit)" : "";
+        process.stderr.write(`🦫 baseline captured: ${n} changed file(s) vs HEAD${suffix}\n`);
+        break;
+      }
+      case "exists":
+        process.stderr.write(`🦫 baseline already exists for this session (kept)\n`);
+        break;
+      case "not-a-repo":
+        process.stderr.write(`techybara: not a git repository; nothing to snapshot\n`);
+        break;
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`techybara: snapshot failed (ignored): ${String(err)}\n`);
+    return 0;
   }
 }
 
