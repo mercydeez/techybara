@@ -29,6 +29,15 @@
     "hooks",
     "local-first"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mercydeez/techybara.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mercydeez/techybara/issues"
+  },
+  "homepage": "https://github.com/mercydeez/techybara#readme",
+  "author": "Atharva Soundankar",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.14.0",
