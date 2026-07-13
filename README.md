@@ -72,12 +72,28 @@ Turns that change nothing stay silent.
 | Command | What it does |
 | --- | --- |
 | `techybara init [--dry-run]` | Install (or preview) the hooks and config in this repo. |
+| `techybara uninstall [--purge]` | Remove TechyBara's hooks. `--purge` also deletes `.techybara/`. |
 | `techybara status` | Diagnose whether TechyBara can run here (git present, inside a repo, hooks installed). |
 | `techybara report` | Print the full markdown report for the current session. |
 | `techybara snapshot` | Capture a baseline manually (normally run for you by the SessionStart hook). |
 
 The full report for each session is also saved to
 `.techybara/sessions/<id>/report.md`.
+
+## Coverage — what it detects
+
+| Change | Detected? |
+| --- | --- |
+| Tracked file modified/added/deleted (uncommitted) | ✅ |
+| Staged changes | ✅ |
+| Untracked, non-ignored files | ✅ |
+| **Changes committed during the session** (working tree ends clean) | ✅ |
+| **Gitignored protected files** (e.g. `.env`) added/changed/deleted | ✅ |
+| Non-protected gitignored files | ❌ by design (ignored, unless they match a protected glob) |
+| Change made and **reverted** before the turn ended | ❌ (end-state comparison; see below) |
+| Whether the change was made by Claude vs. you vs. your IDE | ❌ not distinguishable |
+| Claims about commands run ("I ran the tests") | ❌ not verified |
+| File **contents** | ❌ never read, stored, or displayed |
 
 ---
 
@@ -155,8 +171,12 @@ Stop hook (each turn) ─▶ techybara report ─▶ diff baseline vs. current w
 
 The baseline records a content hash for every file that differs from `HEAD` at the
 start of the session, plus a direct hash of every protected-glob match (including
-gitignored ones). At each turn's end, TechyBara re-captures and compares. A
-per-turn fingerprint suppresses repeat reports so you only hear about *new* changes.
+gitignored ones). At each turn's end, TechyBara re-captures and compares **by
+content**. If commits happened during the session, it also diffs the baseline
+commit against the current one, so changes that were committed (and so no longer
+appear in `git status`) are still reported — while files that were merely dirty
+before the session, and unchanged since, are correctly left out. A per-turn
+fingerprint suppresses repeat reports so you only hear about *new* changes.
 
 Everything except the hook adapter is agent-agnostic by design — support for other
 agents is a future possibility, not a v0.1 promise.
