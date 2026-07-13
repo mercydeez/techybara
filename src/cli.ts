@@ -1,9 +1,13 @@
 #!/usr/bin/env node
+import { appendFileSync, readFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
 import { init } from "./init.js";
-import { defaultConfig } from "./config.js";
 import { writeBaseline } from "./core/snapshot.js";
+import { gitAvailable, getToplevel } from "./core/git.js";
+import { readHookInput, emitSystemMessage, installWatchdog } from "./hooks/adapter.js";
+import { runReport } from "./report/run.js";
 
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
 
@@ -53,10 +57,9 @@ export async function run(argv: readonly string[]): Promise<number> {
     case "snapshot":
       return cmdSnapshot(rest);
     case "report":
+      return cmdReport(rest);
     case "status":
-      // Implemented in later milestones (M3/M5).
-      process.stderr.write(`techybara: "${first}" is not implemented yet\n`);
-      return 1;
+      return cmdStatus();
   }
 }
 
@@ -65,34 +68,112 @@ function flagValue(args: readonly string[], name: string): string | undefined {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 }
 
+/** Best-effort error log; never throws. */
+function safeLogError(cwd: string, err: unknown): void {
+  try {
+    const dir = join(cwd, ".techybara");
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "error.log"), `${new Date().toISOString()} ${String(err)}\n`, "utf8");
+  } catch {
+    // give up silently — logging must never break a session
+  }
+}
+
 /**
- * Capture a baseline for the current session. Runs from the SessionStart hook.
- * Always exits 0: a snapshot failure must never break the session. (Full
- * hardening / stdin payload parsing arrives with the M5 hook adapter; for now
- * the session id may be passed with --session for manual testing.)
+ * SessionStart hook: capture the baseline. Reads the session id + cwd from the
+ * hook payload on stdin (falling back to argv for manual runs). Always exits 0.
  */
 async function cmdSnapshot(args: readonly string[]): Promise<number> {
+  installWatchdog(5000);
+  const hook = await readHookInput();
+  const isHook = hook !== null || args.includes("--hook");
+  const cwd = hook?.cwd ?? process.cwd();
   try {
-    const sessionId = flagValue(args, "--session") ?? "manual";
-    const outcome = await writeBaseline(process.cwd(), sessionId, defaultConfig());
-    switch (outcome.status) {
-      case "written": {
-        const n = Object.keys(outcome.snapshot.entries).length;
-        const suffix = outcome.snapshot.degraded ? " (status-only, caps hit)" : "";
-        process.stderr.write(`🦫 baseline captured: ${n} changed file(s) vs HEAD${suffix}\n`);
-        break;
+    const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
+    const outcome = await writeBaseline(cwd, sessionId);
+    if (!isHook) {
+      switch (outcome.status) {
+        case "written": {
+          const n = Object.keys(outcome.snapshot.entries).length;
+          const suffix = outcome.snapshot.degraded ? " (status-only, caps hit)" : "";
+          process.stderr.write(`🦫 baseline captured: ${n} changed file(s) vs HEAD${suffix}\n`);
+          break;
+        }
+        case "exists":
+          process.stderr.write(`🦫 baseline already exists for this session (kept)\n`);
+          break;
+        case "not-a-repo":
+          process.stderr.write(`techybara: not a git repository; nothing to snapshot\n`);
+          break;
       }
-      case "exists":
-        process.stderr.write(`🦫 baseline already exists for this session (kept)\n`);
-        break;
-      case "not-a-repo":
-        process.stderr.write(`techybara: not a git repository; nothing to snapshot\n`);
-        break;
     }
     return 0;
   } catch (err) {
-    process.stderr.write(`techybara: snapshot failed (ignored): ${String(err)}\n`);
+    safeLogError(cwd, err);
+    return 0; // never break the session
+  }
+}
+
+/**
+ * Stop hook (fires every turn): report what changed since the baseline. Emits a
+ * one-line systemMessage only when something changed since the last report.
+ * Always exits 0 — critically, never 2, which would block Claude from stopping.
+ */
+async function cmdReport(args: readonly string[]): Promise<number> {
+  installWatchdog(5000);
+  const hook = await readHookInput();
+  const isHook = hook !== null || args.includes("--hook");
+  const cwd = hook?.cwd ?? process.cwd();
+  try {
+    const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
+    const res = await runReport(cwd, sessionId);
+
+    if (isHook) {
+      if (res.status === "reported" && res.oneLine) {
+        emitSystemMessage(res.oneLine);
+      }
+      // every other status is silent by design
+      return 0;
+    }
+
+    // Manual invocation: print the full report for a human.
+    switch (res.status) {
+      case "not-a-repo":
+        process.stderr.write(`techybara: not a git repository\n`);
+        break;
+      case "baseline-missing":
+        process.stderr.write(`techybara: no baseline for this session yet (re-established now)\n`);
+        break;
+      default:
+        if (res.markdown) process.stdout.write(res.markdown);
+    }
     return 0;
+  } catch (err) {
+    safeLogError(cwd, err);
+    return 0; // never break the session
+  }
+}
+
+/** Manual diagnostic: can TechyBara run here, and is it installed? */
+async function cmdStatus(): Promise<number> {
+  const cwd = process.cwd();
+  const hasGit = await gitAvailable();
+  const top = hasGit ? await getToplevel(cwd) : null;
+
+  const lines: string[] = [`TechyBara ${VERSION}`];
+  lines.push(`  git:    ${hasGit ? "available" : "NOT FOUND — TechyBara cannot verify anything"}`);
+  lines.push(`  repo:   ${top ?? "not a git repository — hooks will safely no-op"}`);
+  lines.push(`  hooks:  ${hooksInstalled(cwd) ? "installed" : "not installed (run: techybara init)"}`);
+  process.stdout.write(lines.join("\n") + "\n");
+  return 0;
+}
+
+function hooksInstalled(cwd: string): boolean {
+  try {
+    const text = readFileSync(join(cwd, ".claude", "settings.json"), "utf8");
+    return text.includes("report --hook");
+  } catch {
+    return false;
   }
 }
 

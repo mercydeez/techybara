@@ -22,10 +22,4 @@ describe("cli dispatch", () => {
   it("returns 0 with no arguments (shows usage)", async () => {
     expect(await run([])).toBe(0);
   });
-
-  it("recognizes not-yet-implemented commands (exit 1)", async () => {
-    // report lands in M3/M5; until then it should fail loudly rather than no-op.
-    // (Avoid init/snapshot here — they have real filesystem side effects on cwd.)
-    expect(await run(["report"])).toBe(1);
-  });
 });

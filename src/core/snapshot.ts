@@ -1,7 +1,7 @@
 // Snapshot engine: capture the working-tree state (relative to HEAD) as content
 // hashes, so a later capture can be diffed to find what changed *during* a
 // session — not merely what is dirty vs HEAD.
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
 import { getHead, getPorcelain, getToplevel, hashObjects } from "./git.js";
@@ -28,16 +28,19 @@ export async function captureSnapshot(
   let degraded = false;
   let note: string | undefined;
 
-  if (porcelain.length > config.maxFiles) {
+  // Never report TechyBara's own state directory, regardless of gitignore.
+  const visible = porcelain.filter((e) => !isStatePath(e.path));
+
+  if (visible.length > config.maxFiles) {
     // Too many changes to hash within budget: record paths + status only.
     degraded = true;
-    note = `${porcelain.length} changed files exceeds maxFiles (${config.maxFiles}); status-only.`;
-    for (const e of porcelain) {
+    note = `${visible.length} changed files exceeds maxFiles (${config.maxFiles}); status-only.`;
+    for (const e of visible) {
       entries[e.path] = { xy: e.xy, hash: null };
     }
   } else {
     const toHash: string[] = [];
-    for (const e of porcelain) {
+    for (const e of visible) {
       entries[e.path] = { xy: e.xy, hash: null };
       if (e.deleted) continue;
       if (fileSizeAtMost(join(top, e.path), maxBytes)) toHash.push(e.path);
@@ -55,6 +58,11 @@ export async function captureSnapshot(
   await mergeProtectedFiles(top, config, entries, maxBytes);
 
   return snapshotOf(sessionId, head, top, degraded, note, entries);
+}
+
+/** True for TechyBara's own state directory, which must never be reported. */
+function isStatePath(path: string): boolean {
+  return path === ".techybara" || path.startsWith(".techybara/");
 }
 
 function fileSizeAtMost(abs: string, maxBytes: number): boolean {
@@ -145,6 +153,19 @@ export async function writeBaseline(
   writeFileSync(bpath, JSON.stringify(snapshot, null, 2) + "\n", "utf8");
   pruneOldSessions(top);
   return { status: "written", top, snapshot };
+}
+
+/** Read a baseline snapshot from disk, or null if missing/corrupt/wrong version. */
+export function readSnapshot(path: string): Snapshot | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Snapshot>;
+    if (parsed && parsed.version === SNAPSHOT_VERSION && parsed.entries && typeof parsed.entries === "object") {
+      return parsed as Snapshot;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Keep only the most recently modified KEEP_SESSIONS session directories. */
