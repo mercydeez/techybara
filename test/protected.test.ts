@@ -111,4 +111,54 @@ describe("flagship: gitignored .env change is caught and never leaked", () => {
     expect(delta.changes).toHaveLength(0);
     expect(renderOneLine(delta)).toBeNull();
   });
+
+  it("classifies a gitignored .env ADDED during the session as added", async () => {
+    writeFileSync(join(dir, ".gitignore"), ".env\n");
+    writeFileSync(join(dir, "a.txt"), "a\n");
+    commit("init");
+
+    const cfg = defaultConfig();
+    const base = await captureSnapshot(await top(), "s1", cfg);
+    writeFileSync(join(dir, ".env"), "SECRET=new\n");
+    const current = await captureSnapshot(await top(), "s1", cfg);
+    const delta = computeDelta(base, current, { isProtected: compileProtected(cfg.protectedPaths) });
+
+    const change = delta.changes.find((c) => c.path === ".env");
+    expect(change?.kind).toBe("added");
+    expect(change?.protected).toBe(true);
+  });
+
+  it("classifies a gitignored .env DELETED during the session as deleted", async () => {
+    writeFileSync(join(dir, ".gitignore"), ".env\n");
+    writeFileSync(join(dir, ".env"), "SECRET=bye\n");
+    writeFileSync(join(dir, "a.txt"), "a\n");
+    commit("init");
+
+    const cfg = defaultConfig();
+    const base = await captureSnapshot(await top(), "s1", cfg);
+    rmSync(join(dir, ".env"));
+    const current = await captureSnapshot(await top(), "s1", cfg);
+    const delta = computeDelta(base, current, { isProtected: compileProtected(cfg.protectedPaths) });
+
+    const change = delta.changes.find((c) => c.path === ".env");
+    expect(change?.kind).toBe("deleted");
+    expect(change?.protected).toBe(true);
+  });
+
+  it("still detects a protected file larger than maxFileSizeMB", async () => {
+    writeFileSync(join(dir, ".gitignore"), ".env\n");
+    writeFileSync(join(dir, "a.txt"), "a\n");
+    commit("init");
+
+    // 1 KB configured cap; the protected file is 5 KB. Protected files are
+    // exempt from the configured cap (hashed up to a hard 64 MB ceiling).
+    const cfg = { ...defaultConfig(), maxFileSizeMB: 0.001 };
+    writeFileSync(join(dir, ".env"), "X".repeat(5000));
+    const base = await captureSnapshot(await top(), "s1", cfg);
+    writeFileSync(join(dir, ".env"), "Y".repeat(5000));
+    const current = await captureSnapshot(await top(), "s1", cfg);
+    const delta = computeDelta(base, current, { isProtected: compileProtected(cfg.protectedPaths) });
+
+    expect(delta.protectedPaths).toContain(".env");
+  });
 });

@@ -123,7 +123,7 @@ async function cmdSnapshot(args: readonly string[]): Promise<number> {
  * Always exits 0 — critically, never 2, which would block Claude from stopping.
  */
 async function cmdReport(args: readonly string[]): Promise<number> {
-  installWatchdog(5000);
+  installWatchdog(5000, "🦫 ⚠️ TechyBara timed out and could not verify this turn.");
   const hook = await readHookInput();
   const isHook = hook !== null || args.includes("--hook");
   const cwd = hook?.cwd ?? process.cwd();
@@ -134,6 +134,12 @@ async function cmdReport(args: readonly string[]): Promise<number> {
     if (isHook) {
       if (res.status === "reported" && res.oneLine) {
         emitSystemMessage(res.oneLine);
+      } else if (res.status === "baseline-missing") {
+        // A lost/corrupt baseline means earlier session changes may go
+        // unreported. Say so rather than silently starting over.
+        emitSystemMessage(
+          "🦫 ⚠️ Session baseline was missing or unreadable — re-established now. Changes made before this point may not be reported.",
+        );
       }
       // every other status is silent by design
       return 0;

@@ -49,11 +49,27 @@ function signature(entry: SnapshotEntry | undefined): string {
   return "present:" + entry.xy;
 }
 
-function classify(baselineSig: string, currentSig: string, current: SnapshotEntry | undefined): ChangeKind {
+function classify(
+  baselineSig: string,
+  currentSig: string,
+  baseline: SnapshotEntry | undefined,
+  current: SnapshotEntry | undefined,
+): ChangeKind {
   if (currentSig === "deleted") return "deleted";
-  // A newly-present file (untracked "??" or a staged/committed add "A…") that
-  // did not exist at session start is an addition; otherwise it's a modification.
-  if (baselineSig === "clean" && current && (current.xy === "??" || current.xy[0] === "A")) return "added";
+  // A protected-walk entry ("!!") exists only while the file exists on disk —
+  // git never reports these (they are typically gitignored). So baseline "!!"
+  // with no current entry means the file is gone, not "clean".
+  if (currentSig === "clean" && baseline?.xy === "!!") return "deleted";
+  // A newly-present file (untracked "??", staged/committed add "A…", or a
+  // protected-walk discovery "!!") that did not exist at session start is an
+  // addition; otherwise it's a modification.
+  if (
+    baselineSig === "clean" &&
+    current &&
+    (current.xy === "??" || current.xy[0] === "A" || current.xy === "!!")
+  ) {
+    return "added";
+  }
   return "modified";
 }
 
@@ -78,7 +94,7 @@ export function computeDelta(
     const cs = signature(c);
     if (bs === cs) continue;
 
-    const kind = classify(bs, cs, c);
+    const kind = classify(bs, cs, b, c);
     const isProt = isProtected(path);
     if (isProt) protectedSet.add(path);
     changes.push({ path, kind, protected: isProt });

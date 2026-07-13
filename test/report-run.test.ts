@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeBaseline } from "../src/core/snapshot.js";
@@ -82,5 +82,34 @@ describe("runReport", () => {
     // baseline now exists for subsequent turns
     const top = (await getToplevel(dir))!;
     expect(existsSync(baselinePath(top, SID))).toBe(true);
+  });
+
+  it("re-reports a change that is reverted and then re-applied identically", async () => {
+    await writeBaseline(dir, SID);
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    expect((await runReport(dir, SID)).status).toBe("reported");
+
+    writeFileSync(join(dir, "a.txt"), "one\n"); // back to baseline
+    expect((await runReport(dir, SID)).status).toBe("no-changes");
+
+    writeFileSync(join(dir, "a.txt"), "two\n"); // same divergence again
+    // Pre-fix this was "suppressed": the stale fingerprint silenced a real,
+    // current divergence from baseline.
+    expect((await runReport(dir, SID)).status).toBe("reported");
+  });
+
+  it("honors config.ignorePaths (non-protected ignored paths stay silent)", async () => {
+    mkdirSync(join(dir, ".techybara"), { recursive: true });
+    writeFileSync(join(dir, ".techybara", "config.json"), JSON.stringify({ ignorePaths: ["logs/**"] }));
+    await writeBaseline(dir, SID);
+
+    mkdirSync(join(dir, "logs"), { recursive: true });
+    writeFileSync(join(dir, "logs", "run.log"), "noise\n");
+    const res = await runReport(dir, SID);
+    expect(res.status).toBe("no-changes");
+
+    // a non-ignored change is still reported
+    writeFileSync(join(dir, "b.txt"), "real\n");
+    expect((await runReport(dir, SID)).status).toBe("reported");
   });
 });

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultConfig } from "../src/config.js";
 import { writeBaseline } from "../src/core/snapshot.js";
 import { runReport } from "../src/report/run.js";
 
@@ -100,5 +101,62 @@ describe("pre-existing dirtiness is excluded (acceptance #2)", () => {
     const res = await runReport(dir, SID);
     // content is identical to session start -> not a session change
     expect(res.status).toBe("no-changes");
+  });
+});
+
+describe("no-commit repositories (first commit during session)", () => {
+  it("does not report untracked-at-baseline files whose content is unchanged by the initial commit", async () => {
+    const fresh = mkdtempSync(join(tmpdir(), "tb-fresh-"));
+    try {
+      execFileSync("git", ["init"], { cwd: fresh, stdio: "pipe" });
+      execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: fresh, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: fresh, stdio: "pipe" });
+      writeFileSync(join(fresh, "x.txt"), "x0\n");
+      await writeBaseline(fresh, SID); // baseline has no HEAD
+      execFileSync("git", ["add", "-A"], { cwd: fresh, stdio: "pipe" });
+      execFileSync("git", ["-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "initial"], {
+        cwd: fresh,
+        stdio: "pipe",
+      });
+
+      const res = await runReport(fresh, SID);
+      expect(res.status).toBe("no-changes");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("large commits stay within the hook budget", () => {
+  it("reports a 300-file commit correctly and quickly (batched blob lookup)", async () => {
+    await writeBaseline(dir, SID);
+    for (let i = 0; i < 300; i++) {
+      writeFileSync(join(dir, `f${i}.txt`), `content ${i}\n`);
+    }
+    commit("big agent commit");
+
+    const t0 = Date.now();
+    const res = await runReport(dir, SID);
+    const elapsed = Date.now() - t0;
+
+    expect(res.status).toBe("reported");
+    expect(res.oneLine).toContain("300 files changed");
+    // Pre-fix this took >5s (one git spawn per path) and the hook watchdog
+    // killed it silently. Batched, it comfortably fits the budget.
+    expect(elapsed).toBeLessThan(4000);
+  });
+
+  it("marks the report degraded instead of hashing an oversized commit", async () => {
+    const cfg = { ...defaultConfig(), maxFiles: 5 };
+    await writeBaseline(dir, SID, cfg);
+    // config on disk governs runReport; write it so the report path sees maxFiles=5
+    mkdirSync(join(dir, ".techybara"), { recursive: true });
+    writeFileSync(join(dir, ".techybara", "config.json"), JSON.stringify({ maxFiles: 5 }));
+    for (let i = 0; i < 10; i++) writeFileSync(join(dir, `g${i}.txt`), `v${i}\n`);
+    commit("too big");
+
+    const res = await runReport(dir, SID);
+    expect(res.status).toBe("reported");
+    expect(res.oneLine).toContain("Partial");
   });
 });

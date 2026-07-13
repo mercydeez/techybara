@@ -2,11 +2,12 @@
 // diff, write the markdown report, and decide whether to surface a one-liner
 // (suppressed when nothing changed since the last report). Kept separate from
 // the CLI so it is unit-testable without spawning a process.
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { loadConfig } from "../config.js";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { loadConfig, type TechyBaraConfig } from "../config.js";
 import { writeFileAtomic } from "../core/fsutil.js";
 import { computeDelta, deltaFingerprint } from "../core/diff.js";
-import { blobHashAt, diffNameStatus, getToplevel } from "../core/git.js";
+import { EMPTY_TREE, diffNameStatus, getToplevel, treeHashesAt } from "../core/git.js";
+import { compileGlobs } from "../core/glob.js";
 import { baselinePath, reportPath, reportStatePath, sessionDir } from "../core/paths.js";
 import { compileProtected } from "../core/protected.js";
 import { captureSnapshot, readSnapshot } from "../core/snapshot.js";
@@ -50,7 +51,7 @@ export async function runReport(
   const current = await captureSnapshot(top, sessionId, config);
   // Surface changes that were committed during the session: once committed, they
   // vanish from `git status`, so neither snapshot's dirty set contains them.
-  await mergeCommittedChanges(top, baseline, current);
+  await mergeCommittedChanges(top, baseline, current, config);
   const isProtected = compileProtected(config.protectedPaths);
   const delta = computeDelta(baseline, current, { isProtected });
 
@@ -64,6 +65,14 @@ export async function runReport(
 
   const oneLine = renderOneLine(delta);
   if (!oneLine) {
+    // The tree is back at (or never left) the session baseline. Clear the
+    // suppression fingerprint so a later re-divergence — even one identical to
+    // an earlier reported state — is reported again rather than silenced.
+    try {
+      rmSync(reportStatePath(top, sessionId), { force: true });
+    } catch {
+      // best-effort; a stale fingerprint only risks one suppressed repeat
+    }
     return { status: "no-changes", markdown };
   }
 
@@ -83,25 +92,60 @@ export async function runReport(
  * changed between baseline HEAD and current HEAD, recording each side's content
  * (baseline blob vs. committed blob). computeDelta then compares by content, so
  * a commit that merely finalized already-dirty content is correctly ignored.
+ *
+ * A baseline with no commits diffs against git's empty tree, so the very first
+ * commit of a repository is handled like any other commit.
+ *
+ * All blob lookups are batched (ls-tree) — a large commit must complete within
+ * the hook watchdog. Beyond maxFiles the commit's contents are not verified and
+ * the report is explicitly marked degraded instead of silently truncated.
  */
-async function mergeCommittedChanges(top: string, baseline: Snapshot, current: Snapshot): Promise<void> {
-  if (!baseline.head || !current.head || baseline.head === current.head) return;
+async function mergeCommittedChanges(
+  top: string,
+  baseline: Snapshot,
+  current: Snapshot,
+  config: TechyBaraConfig,
+): Promise<void> {
+  if (!current.head || baseline.head === current.head) return;
+  const baseRef = baseline.head ?? EMPTY_TREE;
 
-  for (const { status, path } of await diffNameStatus(top, baseline.head, current.head)) {
-    if (path === ".techybara" || path.startsWith(".techybara/")) continue;
+  const isIgnored = compileGlobs(config.ignorePaths);
+  const changed = (await diffNameStatus(top, baseRef, current.head)).filter(
+    ({ path }) => path !== ".techybara" && !path.startsWith(".techybara/") && !isIgnored(path),
+  );
+  if (changed.length === 0) return;
 
-    // Baseline side: its content at session start (absent for a committed add).
-    if (!(path in baseline.entries) && status !== "A") {
-      const b = await blobHashAt(top, baseline.head, path);
+  if (changed.length > config.maxFiles) {
+    current.degraded = true;
+    const msg = `${changed.length} paths committed during the session exceeds maxFiles (${config.maxFiles}); committed contents not verified.`;
+    current.note = current.note ? `${current.note} ${msg}` : msg;
+    return;
+  }
+
+  const needBaseline = changed
+    .filter(({ status, path }) => status !== "A" && !(path in baseline.entries))
+    .map(({ path }) => path);
+  const needCurrent = changed
+    .filter(({ status, path }) => status !== "D" && !(path in current.entries))
+    .map(({ path }) => path);
+
+  const [baseHashes, curHashes] = await Promise.all([
+    treeHashesAt(top, baseRef, needBaseline),
+    treeHashesAt(top, current.head, needCurrent),
+  ]);
+
+  for (const { status, path } of changed) {
+    // Baseline side: content at session start (absent for a committed add).
+    if (!(path in baseline.entries)) {
+      const b = baseHashes.get(path);
       if (b) baseline.entries[path] = { xy: "@@", hash: b };
     }
-
     // Current side: skip if the working tree already recorded it (still dirty).
     if (path in current.entries) continue;
     if (status === "D") {
       current.entries[path] = { xy: " D", hash: null };
     } else {
-      const c = await blobHashAt(top, current.head, path);
+      const c = curHashes.get(path);
       if (c) current.entries[path] = { xy: status === "A" ? "A@" : "M@", hash: c };
     }
   }

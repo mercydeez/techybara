@@ -13,7 +13,9 @@ export function sessionsDir(top: string): string {
 /** Session ids come from Claude Code (uuids), but sanitize defensively. */
 export function safeSessionId(sessionId: string): string {
   const cleaned = sessionId.replace(/[^A-Za-z0-9._-]/g, "_");
-  return cleaned.length > 0 ? cleaned : "unknown";
+  // "." / ".." would resolve outside the sessions directory.
+  if (cleaned.length === 0 || cleaned === "." || cleaned === "..") return "unknown";
+  return cleaned;
 }
 
 export function sessionDir(top: string, sessionId: string): string {

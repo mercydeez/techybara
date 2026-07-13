@@ -68,8 +68,20 @@ export function emitSystemMessage(message: string): void {
  * Guarantee the process exits (cleanly, code 0) within `ms`, no matter what the
  * hook body is doing. The timer is unref'd so it never delays a fast, healthy
  * run. This is the last line of defense behind the settings-level hook timeout.
+ *
+ * If `timeoutMessage` is given it is emitted as a systemMessage before exiting,
+ * so a timed-out turn is visibly unverified instead of silently skipped.
  */
-export function installWatchdog(ms: number): void {
-  const timer = setTimeout(() => process.exit(0), ms);
+export function installWatchdog(ms: number, timeoutMessage?: string): void {
+  const timer = setTimeout(() => {
+    if (timeoutMessage) {
+      try {
+        emitSystemMessage(timeoutMessage);
+      } catch {
+        // nothing more we can do — exit cleanly regardless
+      }
+    }
+    process.exit(0);
+  }, ms);
   timer.unref();
 }

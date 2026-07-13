@@ -7,7 +7,14 @@ import type { SessionDelta } from "../core/diff.js";
  * nothing worth showing, so unchanged turns stay silent.
  */
 export function renderOneLine(delta: SessionDelta): string | null {
-  if (delta.changes.length === 0) return null;
+  if (delta.changes.length === 0) {
+    // Silence must mean "verified: nothing differs". A degraded pass with no
+    // listable changes is NOT that — say so instead of staying quiet.
+    if (delta.degraded) {
+      return "🦫 ⚠️ Partial report — some changes could not be verified this turn (see .techybara report)";
+    }
+    return null;
+  }
 
   const n = delta.changes.length;
   const parts: string[] = [`🦫 ${n} file${n === 1 ? "" : "s"} changed this session`];

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
 import { writeFileAtomic } from "./fsutil.js";
 import { getHead, getPorcelain, getToplevel, hashObjects } from "./git.js";
+import { compileGlobs } from "./glob.js";
 import { findProtectedFiles } from "./protected.js";
 import { baselinePath, sessionDir, sessionsDir } from "./paths.js";
 import { SNAPSHOT_VERSION, type Snapshot, type SnapshotEntry } from "./types.js";
@@ -29,8 +30,11 @@ export async function captureSnapshot(
   let degraded = false;
   let note: string | undefined;
 
-  // Never report TechyBara's own state directory, regardless of gitignore.
-  const visible = porcelain.filter((e) => !isStatePath(e.path));
+  // Never report TechyBara's own state directory, regardless of gitignore, and
+  // honor the user's configured ignorePaths (protected paths are handled by a
+  // separate walk below and win over ignore rules).
+  const isIgnored = compileGlobs(config.ignorePaths);
+  const visible = porcelain.filter((e) => !isStatePath(e.path) && !isIgnored(e.path));
 
   if (visible.length > config.maxFiles) {
     // Too many changes to hash within budget: record paths + status only.
@@ -56,7 +60,10 @@ export async function captureSnapshot(
 
   // Protected files: scan the working tree directly so gitignored secrets are
   // caught even though git never reports them. Runs regardless of degraded mode.
-  await mergeProtectedFiles(top, config, entries, maxBytes);
+  const protectedResult = await mergeProtectedFiles(top, config, entries);
+  if (protectedResult.note) {
+    note = note ? `${note} ${protectedResult.note}` : protectedResult.note;
+  }
 
   return snapshotOf(sessionId, head, top, degraded, note, entries);
 }
@@ -75,34 +82,60 @@ function fileSizeAtMost(abs: string, maxBytes: number): boolean {
 }
 
 /**
- * Ensure every protected working-tree file has a content hash in `entries`,
+ * Hard ceiling for hashing protected files. Protected paths are exempt from the
+ * configurable maxFileSizeMB cap — a changed secret must never be silently
+ * skipped for being big — but an absolute bound keeps a pathological file from
+ * stalling the hook. Beyond it, a size signature still catches add/delete/grow.
+ */
+const PROTECTED_HASH_CAP_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Ensure every protected working-tree file has a content signature in `entries`,
  * hashing any that git's status walk did not already cover (chiefly gitignored
- * ones). Protected files always get hashed, even in degraded mode, because a
- * secret being touched is exactly what we must not miss.
+ * ones). Protected files are always captured, even in degraded mode, because a
+ * secret changing is exactly what we must not miss.
  */
 async function mergeProtectedFiles(
   top: string,
   config: TechyBaraConfig,
   entries: Record<string, SnapshotEntry>,
-  maxBytes: number,
-): Promise<void> {
+): Promise<{ note?: string }> {
   const { paths } = findProtectedFiles(top, config.protectedPaths);
   const toHash: string[] = [];
+  let note: string | undefined;
+
   for (const p of paths) {
     const existing = entries[p];
     if (existing && existing.hash !== null) continue; // already hashed via git status
-    if (fileSizeAtMost(join(top, p), maxBytes)) toHash.push(p);
+    let size: number;
+    try {
+      size = statSync(join(top, p)).size;
+    } catch {
+      continue; // vanished between walk and stat
+    }
+    if (size <= PROTECTED_HASH_CAP_BYTES) {
+      toHash.push(p);
+    } else {
+      // Too large to hash: record a size signature so its presence and growth
+      // are still compared, and say so rather than silently degrading coverage.
+      const sig = `oversize:${size}`;
+      if (existing) existing.hash = sig;
+      else entries[p] = { xy: "!!", hash: sig };
+      note = `protected file ${p} exceeds the ${PROTECTED_HASH_CAP_BYTES / 1024 / 1024}MB hashing cap; compared by size only.`;
+    }
   }
-  if (toHash.length === 0) return;
 
-  const hashes = await hashObjects(top, toHash);
-  for (const p of toHash) {
-    const sha = hashes.get(p);
-    if (sha === undefined) continue;
-    const existing = entries[p];
-    if (existing) existing.hash = sha;
-    else entries[p] = { xy: "!!", hash: sha }; // "!!" = protected, tracking state unknown
+  if (toHash.length > 0) {
+    const hashes = await hashObjects(top, toHash);
+    for (const p of toHash) {
+      const sha = hashes.get(p);
+      if (sha === undefined) continue;
+      const existing = entries[p];
+      if (existing) existing.hash = sha;
+      else entries[p] = { xy: "!!", hash: sha }; // "!!" = protected, tracking state unknown
+    }
   }
+  return { note };
 }
 
 function snapshotOf(

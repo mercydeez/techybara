@@ -128,15 +128,37 @@ export async function diffNameStatus(top: string, from: string, to: string): Pro
   return out;
 }
 
-/** Blob hash of `path` at `ref` (its content in a specific commit), or null if absent there. */
-export async function blobHashAt(top: string, ref: string, path: string): Promise<string | null> {
-  try {
-    const out = await git(top, ["rev-parse", "--verify", "--quiet", `${ref}:${path}`]);
-    const sha = out.toString("utf8").trim();
-    return sha.length > 0 ? sha : null;
-  } catch {
-    return null;
+/** The well-known hash of git's empty tree — a valid diff base for repos whose baseline had no commits. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
+ * Blob hashes for many paths at a ref in a handful of processes (batched
+ * `git ls-tree -z`), instead of one spawn per path — a 300-file commit must not
+ * stall the Stop hook. Paths absent at the ref are simply absent from the map.
+ */
+export async function treeHashesAt(top: string, ref: string, paths: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const CHUNK = 200;
+  for (let i = 0; i < paths.length; i += CHUNK) {
+    const chunk = paths.slice(i, i + CHUNK);
+    let buf: Buffer;
+    try {
+      buf = await git(top, ["ls-tree", "-z", ref, "--", ...chunk]);
+    } catch {
+      continue; // ref unusable -> treat as absent
+    }
+    // Records: "<mode> <type> <hash>\t<path>" NUL-terminated (-z disables quoting).
+    for (const rec of buf.toString("utf8").split("\0")) {
+      if (!rec) continue;
+      const tab = rec.indexOf("\t");
+      if (tab === -1) continue;
+      const meta = rec.slice(0, tab).split(" ");
+      const hash = meta[2];
+      const path = rec.slice(tab + 1);
+      if (hash && meta[1] === "blob") result.set(path, hash);
+    }
   }
+  return result;
 }
 
 /**
