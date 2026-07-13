@@ -1,6 +1,8 @@
 // Configuration types and defaults for TechyBara.
 // The defaults are intentionally useful with zero configuration: a fresh
 // `techybara init` protects common secret/credential/CI paths out of the box.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 export interface TechyBaraConfig {
   /** Glob patterns whose matches are surfaced loudly and hashed directly (even when gitignored). */
@@ -43,4 +45,38 @@ export function defaultConfig(): TechyBaraConfig {
     maxFileSizeMB: 5,
     maxFiles: 2000,
   };
+}
+
+/**
+ * Load config from `<top>/.techybara/config.json`, falling back to defaults for
+ * a missing/corrupt file or any missing field. Never throws — a broken config
+ * must not break a session.
+ */
+export function loadConfig(top: string): TechyBaraConfig {
+  const base = defaultConfig();
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(top, ".techybara", "config.json"), "utf8"));
+  } catch {
+    return base;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+  const r = raw as Record<string, unknown>;
+
+  return {
+    protectedPaths: stringArray(r.protectedPaths) ?? base.protectedPaths,
+    ignorePaths: stringArray(r.ignorePaths) ?? base.ignorePaths,
+    maxFileSizeMB: positiveNumber(r.maxFileSizeMB) ?? base.maxFileSizeMB,
+    maxFiles: positiveNumber(r.maxFiles) ?? base.maxFiles,
+  };
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((v) => typeof v === "string")
+    ? (value as string[])
+    : undefined;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }

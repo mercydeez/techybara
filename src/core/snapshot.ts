@@ -3,8 +3,9 @@
 // session — not merely what is dirty vs HEAD.
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TechyBaraConfig } from "../config.js";
+import { loadConfig, type TechyBaraConfig } from "../config.js";
 import { getHead, getPorcelain, getToplevel, hashObjects } from "./git.js";
+import { findProtectedFiles } from "./protected.js";
 import { baselinePath, sessionDir, sessionsDir } from "./paths.js";
 import { SNAPSHOT_VERSION, type Snapshot, type SnapshotEntry } from "./types.js";
 
@@ -23,6 +24,7 @@ export async function captureSnapshot(
   const porcelain = await getPorcelain(top);
 
   const entries: Record<string, SnapshotEntry> = {};
+  const maxBytes = config.maxFileSizeMB * 1024 * 1024;
   let degraded = false;
   let note: string | undefined;
 
@@ -33,32 +35,65 @@ export async function captureSnapshot(
     for (const e of porcelain) {
       entries[e.path] = { xy: e.xy, hash: null };
     }
-    return snapshotOf(sessionId, head, top, degraded, note, entries);
-  }
-
-  const maxBytes = config.maxFileSizeMB * 1024 * 1024;
-  const toHash: string[] = [];
-  for (const e of porcelain) {
-    entries[e.path] = { xy: e.xy, hash: null };
-    if (e.deleted) continue;
-    const abs = join(top, e.path);
-    let size = 0;
-    try {
-      size = statSync(abs).size;
-    } catch {
-      continue; // vanished between status and stat
+  } else {
+    const toHash: string[] = [];
+    for (const e of porcelain) {
+      entries[e.path] = { xy: e.xy, hash: null };
+      if (e.deleted) continue;
+      if (fileSizeAtMost(join(top, e.path), maxBytes)) toHash.push(e.path);
+      // Oversized/vanished files keep hash: null (compared by presence/status).
     }
-    if (size <= maxBytes) toHash.push(e.path);
-    // Oversized files keep hash: null and are compared by presence/status only.
+    const hashes = await hashObjects(top, toHash);
+    for (const [path, sha] of hashes) {
+      const existing = entries[path];
+      if (existing) existing.hash = sha;
+    }
   }
 
-  const hashes = await hashObjects(top, toHash);
-  for (const [path, sha] of hashes) {
-    const existing = entries[path];
-    if (existing) existing.hash = sha;
-  }
+  // Protected files: scan the working tree directly so gitignored secrets are
+  // caught even though git never reports them. Runs regardless of degraded mode.
+  await mergeProtectedFiles(top, config, entries, maxBytes);
 
   return snapshotOf(sessionId, head, top, degraded, note, entries);
+}
+
+function fileSizeAtMost(abs: string, maxBytes: number): boolean {
+  try {
+    return statSync(abs).size <= maxBytes;
+  } catch {
+    return false; // vanished/unreadable
+  }
+}
+
+/**
+ * Ensure every protected working-tree file has a content hash in `entries`,
+ * hashing any that git's status walk did not already cover (chiefly gitignored
+ * ones). Protected files always get hashed, even in degraded mode, because a
+ * secret being touched is exactly what we must not miss.
+ */
+async function mergeProtectedFiles(
+  top: string,
+  config: TechyBaraConfig,
+  entries: Record<string, SnapshotEntry>,
+  maxBytes: number,
+): Promise<void> {
+  const { paths } = findProtectedFiles(top, config.protectedPaths);
+  const toHash: string[] = [];
+  for (const p of paths) {
+    const existing = entries[p];
+    if (existing && existing.hash !== null) continue; // already hashed via git status
+    if (fileSizeAtMost(join(top, p), maxBytes)) toHash.push(p);
+  }
+  if (toHash.length === 0) return;
+
+  const hashes = await hashObjects(top, toHash);
+  for (const p of toHash) {
+    const sha = hashes.get(p);
+    if (sha === undefined) continue;
+    const existing = entries[p];
+    if (existing) existing.hash = sha;
+    else entries[p] = { xy: "!!", hash: sha }; // "!!" = protected, tracking state unknown
+  }
 }
 
 function snapshotOf(
@@ -94,7 +129,7 @@ export type SnapshotOutcome =
 export async function writeBaseline(
   cwd: string,
   sessionId: string,
-  config: TechyBaraConfig,
+  configOverride?: TechyBaraConfig,
 ): Promise<SnapshotOutcome> {
   const top = await getToplevel(cwd);
   if (!top) return { status: "not-a-repo" };
@@ -104,6 +139,7 @@ export async function writeBaseline(
     return { status: "exists", top };
   }
 
+  const config = configOverride ?? loadConfig(top);
   const snapshot = await captureSnapshot(top, sessionId, config);
   mkdirSync(sessionDir(top, sessionId), { recursive: true });
   writeFileSync(bpath, JSON.stringify(snapshot, null, 2) + "\n", "utf8");
