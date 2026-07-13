@@ -3,7 +3,7 @@ import { appendFileSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
-import { init } from "./init.js";
+import { init, uninstall } from "./init.js";
 import { writeBaseline } from "./core/snapshot.js";
 import { gitAvailable, getToplevel } from "./core/git.js";
 import { readHookInput, emitSystemMessage, installWatchdog } from "./hooks/adapter.js";
@@ -12,10 +12,11 @@ import { runReport } from "./report/run.js";
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
 
 Usage:
-  techybara init [--dry-run]   Install TechyBara hooks into this project's .claude/settings.json
-  techybara snapshot           Capture a baseline of the working tree (run by the SessionStart hook)
-  techybara report [--hook]    Show what changed since the baseline (run by the Stop hook)
-  techybara status             Explain whether TechyBara can run here (git present, in a repo, etc.)
+  techybara init [--dry-run]     Install TechyBara hooks into this project's .claude/settings.json
+  techybara uninstall [--purge]  Remove TechyBara hooks (--purge also deletes .techybara/ state)
+  techybara snapshot             Capture a baseline of the working tree (run by the SessionStart hook)
+  techybara report [--hook]      Show what changed since the baseline (run by the Stop hook)
+  techybara status               Explain whether TechyBara can run here (git present, in a repo, etc.)
 
 Flags:
   -h, --help       Show this help
@@ -23,9 +24,9 @@ Flags:
 
 TechyBara is local-first and never makes network calls.`;
 
-type CommandName = "init" | "snapshot" | "report" | "status";
+type CommandName = "init" | "uninstall" | "snapshot" | "report" | "status";
 
-const COMMANDS: readonly CommandName[] = ["init", "snapshot", "report", "status"];
+const COMMANDS: readonly CommandName[] = ["init", "uninstall", "snapshot", "report", "status"];
 
 function isCommand(value: string | undefined): value is CommandName {
   return value !== undefined && (COMMANDS as readonly string[]).includes(value);
@@ -54,6 +55,8 @@ export async function run(argv: readonly string[]): Promise<number> {
   switch (first) {
     case "init":
       return cmdInit(rest);
+    case "uninstall":
+      return cmdUninstall(rest);
     case "snapshot":
       return cmdSnapshot(rest);
     case "report":
@@ -150,6 +153,10 @@ async function cmdReport(args: readonly string[]): Promise<number> {
     return 0;
   } catch (err) {
     safeLogError(cwd, err);
+    if (isHook) {
+      // Don't fail silently: tell the user this turn wasn't verified.
+      emitSystemMessage("🦫 ⚠️ TechyBara could not verify this turn. Run `techybara status`.");
+    }
     return 0; // never break the session
   }
 }
@@ -175,6 +182,20 @@ function hooksInstalled(cwd: string): boolean {
   } catch {
     return false;
   }
+}
+
+function cmdUninstall(args: readonly string[]): number {
+  const purge = args.includes("--purge");
+  const result = uninstall({ cwd: process.cwd(), purge });
+  if (result.error) {
+    process.stderr.write(`techybara: ${result.error}\n`);
+    return 1;
+  }
+  process.stdout.write(`TechyBara uninstall:\n`);
+  for (const change of result.changes) {
+    process.stdout.write(`  • ${change}\n`);
+  }
+  return 0;
 }
 
 /** Absolute path to this CLI's entrypoint (dist/cli.js), for writing hook commands. */

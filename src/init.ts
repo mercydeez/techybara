@@ -11,10 +11,12 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { defaultConfig } from "./config.js";
+import { writeFileAtomic } from "./core/fsutil.js";
 
 const HOOK_TIMEOUT_SECONDS = 10;
 
@@ -158,7 +160,7 @@ export function init(opts: InitOptions): InitResult {
 
   // --- Perform writes ---
   mkdirSync(claudeDir, { recursive: true });
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
+  writeFileAtomic(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
   mkdirSync(techybaraDir, { recursive: true });
   if (!configExists) {
@@ -170,6 +172,86 @@ export function init(opts: InitOptions): InitResult {
   }
 
   return { changes, wrote: true };
+}
+
+export interface UninstallResult {
+  changes: string[];
+  wrote: boolean;
+  error?: string;
+}
+
+/**
+ * Remove only TechyBara-owned hooks from .claude/settings.json, leaving every
+ * other setting and hook untouched. State (.techybara/) is kept unless `purge`.
+ */
+export function uninstall(opts: { cwd: string; purge: boolean }): UninstallResult {
+  const { cwd, purge } = opts;
+  const changes: string[] = [];
+  const settingsPath = join(cwd, ".claude", "settings.json");
+  const techybaraDir = join(cwd, ".techybara");
+
+  let removedHooks = false;
+  if (existsSync(settingsPath)) {
+    const parsed = readJsonFile(settingsPath);
+    if (!parsed.ok) {
+      return { changes, wrote: false, error: `Refusing to touch ${settingsPath}: it is not valid JSON.` };
+    }
+    if (parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)) {
+      const settings = parsed.value as Record<string, unknown>;
+      const hooks = settings.hooks;
+      if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
+        const h = hooks as Record<string, unknown>;
+        removedHooks = stripOurHooks(h, "SessionStart", "snapshot") || removedHooks;
+        removedHooks = stripOurHooks(h, "Stop", "report --hook") || removedHooks;
+        if (Object.keys(h).length === 0) delete settings.hooks;
+      }
+      if (removedHooks) {
+        writeFileAtomic(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+        changes.push(`Removed TechyBara hooks from ${settingsPath}`);
+      }
+    }
+  }
+
+  const hadState = existsSync(techybaraDir);
+  if (purge && hadState) {
+    rmSync(techybaraDir, { recursive: true, force: true });
+    changes.push(`Deleted ${techybaraDir}`);
+  } else if (hadState) {
+    changes.push(`Kept ${techybaraDir} (config + session state) — use --purge to delete it`);
+  }
+
+  if (changes.length === 0) {
+    changes.push("Nothing to remove — TechyBara was not installed here.");
+  }
+  return { changes, wrote: removedHooks || (purge && hadState) };
+}
+
+/** Drop our hook from one event's groups; returns true if anything was removed. */
+function stripOurHooks(
+  hooksObj: Record<string, unknown>,
+  event: string,
+  sub: "snapshot" | "report --hook",
+): boolean {
+  const arr = hooksObj[event];
+  if (!Array.isArray(arr)) return false;
+  let removed = false;
+  const kept: unknown[] = [];
+  for (const group of arr) {
+    if (group && typeof group === "object" && Array.isArray((group as { hooks?: unknown }).hooks)) {
+      const g = group as { hooks: unknown[]; [k: string]: unknown };
+      const remaining = g.hooks.filter((hook) => {
+        const our = isOurCommand((hook as { command?: unknown })?.command, sub);
+        if (our) removed = true;
+        return !our;
+      });
+      if (remaining.length > 0) kept.push({ ...g, hooks: remaining });
+    } else {
+      kept.push(group);
+    }
+  }
+  if (kept.length > 0) hooksObj[event] = kept;
+  else delete hooksObj[event];
+  return removed;
 }
 
 function gitignoreHasTechyBara(gitignorePath: string): boolean {

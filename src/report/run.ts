@@ -2,8 +2,9 @@
 // diff, write the markdown report, and decide whether to surface a one-liner
 // (suppressed when nothing changed since the last report). Kept separate from
 // the CLI so it is unit-testable without spawning a process.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { loadConfig } from "../config.js";
+import { writeFileAtomic } from "../core/fsutil.js";
 import { computeDelta, deltaFingerprint } from "../core/diff.js";
 import { blobHashAt, diffNameStatus, getToplevel } from "../core/git.js";
 import { baselinePath, reportPath, reportStatePath, sessionDir } from "../core/paths.js";
@@ -42,7 +43,7 @@ export async function runReport(
     // has a reference. We deliberately report nothing this turn.
     const fresh = await captureSnapshot(top, sessionId, config);
     mkdirSync(sessionDir(top, sessionId), { recursive: true });
-    writeFileSync(bpath, JSON.stringify(fresh, null, 2) + "\n", "utf8");
+    writeFileAtomic(bpath, JSON.stringify(fresh, null, 2) + "\n");
     return { status: "baseline-missing" };
   }
 
@@ -59,7 +60,7 @@ export async function runReport(
     baselineAt: baseline.createdAt,
   });
   mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  writeFileSync(reportPath(top, sessionId), markdown, "utf8");
+  writeFileAtomic(reportPath(top, sessionId), markdown);
 
   const oneLine = renderOneLine(delta);
   if (!oneLine) {
@@ -73,7 +74,7 @@ export async function runReport(
     return { status: "suppressed", oneLine, markdown };
   }
 
-  writeFileSync(statePath, JSON.stringify({ fingerprint }) + "\n", "utf8");
+  writeFileAtomic(statePath, JSON.stringify({ fingerprint }) + "\n");
   return { status: "reported", oneLine, markdown };
 }
 

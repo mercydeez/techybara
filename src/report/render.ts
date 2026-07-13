@@ -26,7 +26,9 @@ export function renderOneLine(delta: SessionDelta): string | null {
     line += ` · ⚠️ history moved`;
   }
   if (delta.degraded) {
-    line += ` · (status-only)`;
+    // A degraded delta is a partial verification; say so plainly rather than
+    // dressing it up as a normal success.
+    return `🦫 ⚠️ Partial report — ${line.replace(/^🦫 /, "")} · verification limited`;
   }
   return line;
 }
@@ -66,14 +68,15 @@ export function renderMarkdown(delta: SessionDelta, meta: ReportMeta): string {
   }
 
   if (delta.protectedPaths.length > 0) {
-    lines.push(`## ⚠️ Protected paths touched`);
+    lines.push(`## ⚠️ Protected paths changed`);
     lines.push("");
     for (const p of delta.protectedPaths) {
       lines.push(`- \`${p}\``);
     }
     lines.push("");
-    lines.push(`> These paths match your protected-path patterns. TechyBara reports that`);
-    lines.push(`> they changed — it never reads or displays their contents.`);
+    lines.push(`> These paths match your protected-path patterns and **differ from the`);
+    lines.push(`> session baseline**. TechyBara reports that they changed — it never reads`);
+    lines.push(`> or displays their contents.`);
     lines.push("");
   }
 

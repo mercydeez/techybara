@@ -1,9 +1,10 @@
 // Snapshot engine: capture the working-tree state (relative to HEAD) as content
 // hashes, so a later capture can be diffed to find what changed *during* a
 // session — not merely what is dirty vs HEAD.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
+import { writeFileAtomic } from "./fsutil.js";
 import { getHead, getPorcelain, getToplevel, hashObjects } from "./git.js";
 import { findProtectedFiles } from "./protected.js";
 import { baselinePath, sessionDir, sessionsDir } from "./paths.js";
@@ -150,7 +151,7 @@ export async function writeBaseline(
   const config = configOverride ?? loadConfig(top);
   const snapshot = await captureSnapshot(top, sessionId, config);
   mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  writeFileSync(bpath, JSON.stringify(snapshot, null, 2) + "\n", "utf8");
+  writeFileAtomic(bpath, JSON.stringify(snapshot, null, 2) + "\n");
   pruneOldSessions(top);
   return { status: "written", top, snapshot };
 }

@@ -137,7 +137,7 @@ describe("renderMarkdown", () => {
       { isProtected: (p) => p === ".env" },
     );
     const md = renderMarkdown(d, meta);
-    expect(md).toContain("Protected paths touched");
+    expect(md).toContain("Protected paths changed");
     expect(md).toContain("`.env`");
     expect(md).toContain("Added (2)");
     expect(md).toContain("Deleted (1)");
