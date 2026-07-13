@@ -1,0 +1,38 @@
+{
+  "name": "techybara",
+  "version": "0.1.0",
+  "description": "Independent, local-first verification of what a Claude Code session actually changed.",
+  "type": "module",
+  "bin": {
+    "techybara": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.3.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "claude-code",
+    "verification",
+    "git",
+    "diff",
+    "hooks",
+    "local-first"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

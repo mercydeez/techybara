@@ -1,0 +1,6 @@
+# Normalize line endings: LF in the repo, checked out as-is.
+# TechyBara is developed on Windows but must behave identically everywhere.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
