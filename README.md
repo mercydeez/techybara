@@ -10,7 +10,7 @@ tells you what really happened on disk:
 - with **zero keystrokes**: it just appears, and stays silent when nothing changed.
 
 It reads reality from git and the filesystem. It never trusts the agent's own
-report of what it did, **never makes a network call**, and **never blocks your session**.
+report of what it did, **makes no network calls at runtime**, and **never blocks your session**.
 
 > **Status:** v0.1 — an early experiment. It does one thing on purpose. See
 > [What TechyBara can't see](#what-techybara-cant-see) before you rely on it.
@@ -95,7 +95,7 @@ The full report for each session is also saved to
 | Change made and **reverted** before the turn ended | ❌ (end-state comparison; see below) |
 | Whether the change was made by Claude vs. you vs. your IDE | ❌ not distinguishable |
 | Claims about commands run ("I ran the tests") | ❌ not verified |
-| File **contents** | ❌ never read, stored, or displayed |
+| File **contents** | ❌ never stored or displayed (bytes read only transiently by git to compute hashes, never retained) |
 
 ---
 
@@ -119,10 +119,16 @@ at the **end** of the session to its **start**. That means:
   state. It is built to catch the *unnoticed*, not the *hostile*.
 - **Symlinks are not followed.** Changes behind a symlinked path are reported as
   git sees them; TechyBara's protected-path walk skips symlinks entirely.
+- **Protected-path scanning has a safety limit.** The filesystem walk that finds
+  gitignored protected files stops after a fixed number of entries so a
+  pathological tree cannot stall a hook. If a repository is large enough to hit
+  that limit the walk may not inspect every protected path — so the turn is
+  reported as **partial verification** (a visible ⚠️), never silently trusted.
 - **Silence is a verified result, not an absence of one.** TechyBara stays silent
-  only when a complete comparison found no difference from the session baseline.
-  Partial verification, timeouts, internal errors, and a lost/rebuilt baseline all
-  produce a visible ⚠️ message instead of silence.
+  only when a *complete* comparison found no difference from the session baseline.
+  Partial verification (including an incomplete protected-path walk), timeouts,
+  internal errors, and a lost/rebuilt baseline all produce a visible ⚠️ message
+  instead of silence.
 
 If any of these matter for your use case, that's useful signal — please
 [open an issue](#feedback).
@@ -131,13 +137,15 @@ If any of these matter for your use case, that's useful signal — please
 
 ## Privacy & security
 
-- **Zero network during runtime.** TechyBara's reporting engine makes no HTTP
-  requests, telemetry calls, or update checks — there is no networking code to
-  disable. (Installing through npm may access the npm registry; the installed
-  hooks run only local code.)
-- **It never reads or prints file contents.** Reports contain paths, change kinds,
-  and (internally) git blob hashes — never the bytes inside a file. A flagged
-  `.env` tells you it changed; it never shows you what's in it.
+- **No network at runtime.** TechyBara makes no network calls at runtime — no
+  telemetry, no analytics, no update checks, no HTTP client. There is no
+  networking code to disable. (Installing through npm may access the npm
+  registry; the installed hooks run only local code.)
+- **It never stores or displays file contents.** File bytes may be read
+  transiently by git to compute content hashes, but the bytes are not retained or
+  included in reports. Reports contain paths, change kinds, and (internally) git
+  blob hashes — never the bytes inside a file. A flagged `.env` tells you it
+  changed; it never shows you what's in it.
 - **Its reports can name sensitive paths**, so `init` gitignores `.techybara/` for
   you. Keep it that way.
 - **Zero runtime dependencies.** The published package is TypeScript compiled to
