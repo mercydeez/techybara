@@ -51,7 +51,9 @@ function signature(entry: SnapshotEntry | undefined): string {
 
 function classify(baselineSig: string, currentSig: string, current: SnapshotEntry | undefined): ChangeKind {
   if (currentSig === "deleted") return "deleted";
-  if (baselineSig === "clean" && current?.xy === "??") return "added";
+  // A newly-present file (untracked "??" or a staged/committed add "A…") that
+  // did not exist at session start is an addition; otherwise it's a modification.
+  if (baselineSig === "clean" && current && (current.xy === "??" || current.xy[0] === "A")) return "added";
   return "modified";
 }
 

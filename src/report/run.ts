@@ -5,10 +5,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { computeDelta, deltaFingerprint } from "../core/diff.js";
-import { getToplevel } from "../core/git.js";
+import { blobHashAt, diffNameStatus, getToplevel } from "../core/git.js";
 import { baselinePath, reportPath, reportStatePath, sessionDir } from "../core/paths.js";
 import { compileProtected } from "../core/protected.js";
 import { captureSnapshot, readSnapshot } from "../core/snapshot.js";
+import type { Snapshot } from "../core/types.js";
 import { renderMarkdown, renderOneLine } from "./render.js";
 
 export type ReportStatus =
@@ -46,6 +47,9 @@ export async function runReport(
   }
 
   const current = await captureSnapshot(top, sessionId, config);
+  // Surface changes that were committed during the session: once committed, they
+  // vanish from `git status`, so neither snapshot's dirty set contains them.
+  await mergeCommittedChanges(top, baseline, current);
   const isProtected = compileProtected(config.protectedPaths);
   const delta = computeDelta(baseline, current, { isProtected });
 
@@ -71,6 +75,35 @@ export async function runReport(
 
   writeFileSync(statePath, JSON.stringify({ fingerprint }) + "\n", "utf8");
   return { status: "reported", oneLine, markdown };
+}
+
+/**
+ * If HEAD moved during the session, enrich both snapshots with the paths that
+ * changed between baseline HEAD and current HEAD, recording each side's content
+ * (baseline blob vs. committed blob). computeDelta then compares by content, so
+ * a commit that merely finalized already-dirty content is correctly ignored.
+ */
+async function mergeCommittedChanges(top: string, baseline: Snapshot, current: Snapshot): Promise<void> {
+  if (!baseline.head || !current.head || baseline.head === current.head) return;
+
+  for (const { status, path } of await diffNameStatus(top, baseline.head, current.head)) {
+    if (path === ".techybara" || path.startsWith(".techybara/")) continue;
+
+    // Baseline side: its content at session start (absent for a committed add).
+    if (!(path in baseline.entries) && status !== "A") {
+      const b = await blobHashAt(top, baseline.head, path);
+      if (b) baseline.entries[path] = { xy: "@@", hash: b };
+    }
+
+    // Current side: skip if the working tree already recorded it (still dirty).
+    if (path in current.entries) continue;
+    if (status === "D") {
+      current.entries[path] = { xy: " D", hash: null };
+    } else {
+      const c = await blobHashAt(top, current.head, path);
+      if (c) current.entries[path] = { xy: status === "A" ? "A@" : "M@", hash: c };
+    }
+  }
 }
 
 function readLastFingerprint(statePath: string): string | null {

@@ -106,6 +106,39 @@ function pathAfterFields(rec: string, nFields: number): string {
   return rec.slice(idx);
 }
 
+export interface NameStatus {
+  /** Single-letter change status: A, M, D, T (renames disabled). */
+  status: string;
+  path: string;
+}
+
+/**
+ * `git diff --name-status -z --no-renames <from> <to>`: which paths changed
+ * between two commits. Used to surface changes that were committed during the
+ * session (and so are no longer visible in `git status`).
+ */
+export async function diffNameStatus(top: string, from: string, to: string): Promise<NameStatus[]> {
+  const buf = await git(top, ["diff", "--name-status", "-z", "--no-renames", from, to]);
+  const tokens = buf.toString("utf8").split("\0").filter((t) => t.length > 0);
+  const out: NameStatus[] = [];
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const status = tokens[i]![0] ?? "M";
+    out.push({ status, path: tokens[i + 1]! });
+  }
+  return out;
+}
+
+/** Blob hash of `path` at `ref` (its content in a specific commit), or null if absent there. */
+export async function blobHashAt(top: string, ref: string, path: string): Promise<string | null> {
+  try {
+    const out = await git(top, ["rev-parse", "--verify", "--quiet", `${ref}:${path}`]);
+    const sha = out.toString("utf8").trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Compute git blob hashes for the given repo-root-relative paths.
  * Paths are passed as argv (safe against any filename). Chunked to stay under
