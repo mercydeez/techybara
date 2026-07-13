@@ -23,7 +23,9 @@ describe("cli dispatch", () => {
     expect(await run([])).toBe(0);
   });
 
-  it("recognizes known commands (not yet implemented -> exit 1)", async () => {
-    expect(await run(["init"])).toBe(1);
+  it("recognizes not-yet-implemented commands (exit 1)", async () => {
+    // snapshot lands in M2; until then it should fail loudly rather than no-op.
+    // (Avoid `init` here — it has real filesystem side effects on process.cwd().)
+    expect(await run(["snapshot"])).toBe(1);
   });
 });

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
+import { init } from "./init.js";
 
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
 
@@ -41,10 +43,45 @@ export async function run(argv: readonly string[]): Promise<number> {
     return 2;
   }
 
-  // Subcommands land here in later milestones (M1b: init, M2: snapshot, M3/M5: report).
-  // Until then, fail loudly rather than pretending to do work.
-  process.stderr.write(`techybara: "${first}" is not implemented yet\n`);
-  return 1;
+  const rest = argv.slice(1);
+
+  switch (first) {
+    case "init":
+      return cmdInit(rest);
+    case "snapshot":
+    case "report":
+    case "status":
+      // Implemented in later milestones (M2/M3/M5).
+      process.stderr.write(`techybara: "${first}" is not implemented yet\n`);
+      return 1;
+  }
+}
+
+/** Absolute path to this CLI's entrypoint (dist/cli.js), for writing hook commands. */
+function selfCliPath(): string {
+  return fileURLToPath(new URL("./cli.js", import.meta.url));
+}
+
+function cmdInit(args: readonly string[]): number {
+  const dryRun = args.includes("--dry-run");
+  const result = init({ cwd: process.cwd(), cliPath: selfCliPath(), dryRun });
+
+  if (result.error) {
+    process.stderr.write(`techybara: ${result.error}\n`);
+    return 1;
+  }
+
+  const header = dryRun ? "Would make the following changes:" : "TechyBara installed:";
+  process.stdout.write(`${header}\n`);
+  for (const change of result.changes) {
+    process.stdout.write(`  • ${change}\n`);
+  }
+  if (dryRun) {
+    process.stdout.write(`\nRe-run without --dry-run to apply.\n`);
+  } else {
+    process.stdout.write(`\n🦫 Done. TechyBara will report changes after each Claude Code turn.\n`);
+  }
+  return 0;
 }
 
 // Only auto-run when invoked as the CLI entrypoint, so tests can import run().
