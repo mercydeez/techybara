@@ -90,6 +90,8 @@ The full report for each session is also saved to
 | **Changes committed during the session** (working tree ends clean) | ✅ |
 | **Gitignored protected files** (e.g. `.env`) added/changed/deleted | ✅ |
 | Non-protected gitignored files | ❌ by design (ignored, unless they match a protected glob) |
+| Paths matching your `ignorePaths` config | ❌ by design (unless also protected — protected wins) |
+| Protected file larger than 64 MB | ⚠️ compared by size only, and the report says so |
 | Change made and **reverted** before the turn ended | ❌ (end-state comparison; see below) |
 | Whether the change was made by Claude vs. you vs. your IDE | ❌ not distinguishable |
 | Claims about commands run ("I ran the tests") | ❌ not verified |
@@ -115,6 +117,12 @@ at the **end** of the session to its **start**. That means:
 - **It is not a defense against an adversarial agent.** TechyBara is observe-only;
   an agent with shell access could in principle alter TechyBara's own config or
   state. It is built to catch the *unnoticed*, not the *hostile*.
+- **Symlinks are not followed.** Changes behind a symlinked path are reported as
+  git sees them; TechyBara's protected-path walk skips symlinks entirely.
+- **Silence is a verified result, not an absence of one.** TechyBara stays silent
+  only when a complete comparison found no difference from the session baseline.
+  Partial verification, timeouts, internal errors, and a lost/rebuilt baseline all
+  produce a visible ⚠️ message instead of silence.
 
 If any of these matter for your use case, that's useful signal — please
 [open an issue](#feedback).
@@ -123,8 +131,10 @@ If any of these matter for your use case, that's useful signal — please
 
 ## Privacy & security
 
-- **Zero network. Categorically.** TechyBara makes no HTTP requests, no telemetry,
-  no update checks. This is not a setting — there is no networking code to disable.
+- **Zero network during runtime.** TechyBara's reporting engine makes no HTTP
+  requests, telemetry calls, or update checks — there is no networking code to
+  disable. (Installing through npm may access the npm registry; the installed
+  hooks run only local code.)
 - **It never reads or prints file contents.** Reports contain paths, change kinds,
   and (internally) git blob hashes — never the bytes inside a file. A flagged
   `.env` tells you it changed; it never shows you what's in it.
@@ -151,10 +161,16 @@ out of the box.
 
 - **`protectedPaths`** — glob patterns surfaced loudly and hashed directly, *even
   when gitignored* (this is how a `.env` change is caught). Defaults cover common
-  secret, credential, key, `auth/`, and CI-workflow paths.
+  secret, credential, key, `auth/`, and CI-workflow paths. Protected files are
+  exempt from `maxFileSizeMB` (hashed up to a hard 64 MB ceiling; beyond that they
+  are compared by size only and the report says so).
+- **`ignorePaths`** — glob patterns excluded from change reports entirely. If a
+  path matches both lists, **protected wins** — it is still checked and flagged.
 - **`maxFiles`** — above this many changed files, TechyBara degrades to a
-  status-only summary rather than hashing everything (keeps hooks fast on huge trees).
-- **`maxFileSizeMB`** — files larger than this are noted as changed without hashing.
+  status-only summary rather than hashing everything (keeps hooks fast on huge
+  trees). Degraded turns are explicitly marked *Partial* — never silent.
+- **`maxFileSizeMB`** — non-protected files larger than this are noted as changed
+  without hashing.
 
 Globs support `*` (within a path segment), `**` (across segments), and `?`.
 
