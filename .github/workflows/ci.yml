@@ -46,3 +46,28 @@ jobs:
       - run: npm run build
       # Inspects the real packed tarball: required files present, no forbidden leaks.
       - run: node scripts/verify-pack.mjs
+
+  # Single stable context for branch protection: succeeds only when the whole
+  # test matrix and package verification succeeded. Rulesets require "ci-gate"
+  # instead of 13 individual matrix labels that break on any rename.
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - test
+      - package-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required CI jobs
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGE_RESULT: ${{ needs.package-verify.result }}
+        run: |
+          echo "test: $TEST_RESULT"
+          echo "package-verify: $PACKAGE_RESULT"
+
+          if [ "$TEST_RESULT" != "success" ] ||
+             [ "$PACKAGE_RESULT" != "success" ]; then
+            echo "One or more required CI jobs did not succeed."
+            exit 1
+          fi
