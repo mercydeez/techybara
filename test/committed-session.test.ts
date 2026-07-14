@@ -31,8 +31,35 @@ beforeEach(() => {
   writeFileSync(join(dir, "c.txt"), "c0\n");
   commit("init");
 });
+/**
+ * Remove a fixture directory with aggressive retries. In "best-effort" mode,
+ * known-transient filesystem races (ENOTEMPTY/EBUSY/EPERM — seen tearing down
+ * large fresh .git dirs on CI runners) are tolerated with a warning after the
+ * retries are exhausted; every unexpected error code still rethrows. "strict"
+ * mode rethrows everything.
+ */
+const TRANSIENT_CLEANUP_CODES = new Set(["ENOTEMPTY", "EBUSY", "EPERM"]);
+
+function cleanupFixture(path: string, mode: "strict" | "best-effort"): void {
+  try {
+    rmSync(path, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 150,
+    });
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (mode === "best-effort" && typeof code === "string" && TRANSIENT_CLEANUP_CODES.has(code)) {
+      console.warn(`cleanup: tolerated transient ${code} removing fixture ${path}`);
+      return;
+    }
+    throw err;
+  }
+}
+
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  cleanupFixture(dir, "best-effort");
 });
 
 describe("committed-during-session changes (acceptance #1)", () => {
@@ -122,7 +149,7 @@ describe("no-commit repositories (first commit during session)", () => {
       const res = await runReport(fresh, SID);
       expect(res.status).toBe("no-changes");
     } finally {
-      rmSync(fresh, { recursive: true, force: true });
+      cleanupFixture(fresh, "strict");
     }
   });
 });
@@ -144,7 +171,9 @@ describe("large commits stay within the hook budget", () => {
     // Pre-fix this took >5s (one git spawn per path) and the hook watchdog
     // killed it silently. Batched, it comfortably fits the budget.
     expect(elapsed).toBeLessThan(4000);
-  });
+    // 30s wrapper timeout covers fixture creation, git ops, and teardown on
+    // slower CI runners; the elapsed<4000 assertion above still guards report speed.
+  }, 30000);
 
   it("marks the report degraded instead of hashing an oversized commit", async () => {
     const cfg = { ...defaultConfig(), maxFiles: 5 };
