@@ -31,13 +31,35 @@ beforeEach(() => {
   writeFileSync(join(dir, "c.txt"), "c0\n");
   commit("init");
 });
+/**
+ * Remove a fixture directory with aggressive retries. In "best-effort" mode,
+ * known-transient filesystem races (ENOTEMPTY/EBUSY/EPERM — seen tearing down
+ * large fresh .git dirs on CI runners) are tolerated with a warning after the
+ * retries are exhausted; every unexpected error code still rethrows. "strict"
+ * mode rethrows everything.
+ */
+const TRANSIENT_CLEANUP_CODES = new Set(["ENOTEMPTY", "EBUSY", "EPERM"]);
+
+function cleanupFixture(path: string, mode: "strict" | "best-effort"): void {
+  try {
+    rmSync(path, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 150,
+    });
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (mode === "best-effort" && typeof code === "string" && TRANSIENT_CLEANUP_CODES.has(code)) {
+      console.warn(`cleanup: tolerated transient ${code} removing fixture ${path}`);
+      return;
+    }
+    throw err;
+  }
+}
+
 afterEach(() => {
-  rmSync(dir, {
-    recursive: true,
-    force: true,
-    maxRetries: 3,
-    retryDelay: 200,
-  });
+  cleanupFixture(dir, "best-effort");
 });
 
 describe("committed-during-session changes (acceptance #1)", () => {
@@ -127,12 +149,7 @@ describe("no-commit repositories (first commit during session)", () => {
       const res = await runReport(fresh, SID);
       expect(res.status).toBe("no-changes");
     } finally {
-      rmSync(fresh, {
-        recursive: true,
-        force: true,
-        maxRetries: 3,
-        retryDelay: 200,
-      });
+      cleanupFixture(fresh, "strict");
     }
   });
 });
