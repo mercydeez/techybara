@@ -6,9 +6,11 @@
 
 *Quietly checks what actually changed.*
 
-[![status: v0.1 experimental](https://img.shields.io/badge/status-v0.1%20experimental-orange.svg)](#feedback)
+[![npm version](https://img.shields.io/npm/v/techybara.svg)](https://www.npmjs.com/package/techybara)
+[![GitHub release](https://img.shields.io/github/v/release/mercydeez/techybara.svg)](https://github.com/mercydeez/techybara/releases)
 [![node: >=18.3](https://img.shields.io/badge/node-%3E%3D18.3-brightgreen.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![status: v0.1 experimental](https://img.shields.io/badge/status-v0.1%20experimental-orange.svg)](#feedback)
 
 **See what a Claude Code session actually changed — automatically, after every turn.**
 
@@ -254,6 +256,10 @@ whether it earns its place in your workflow. Especially welcome:
 - limitations that actually get in your way.
 
 All of these are welcome via [GitHub issues](https://github.com/mercydeez/techybara/issues).
+
+## Changelog
+
+Release history is in [CHANGELOG.md](./CHANGELOG.md).
 
 ## License
 

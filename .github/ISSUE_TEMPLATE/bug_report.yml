@@ -1,0 +1,103 @@
+name: Bug report
+description: Report something TechyBara got wrong — a missed change, a false report, a crash, or a broken hook.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve TechyBara.
+
+        ⚠️ **Do not paste secrets.** Never include `.env` contents, credentials,
+        keys, tokens, or private file contents. TechyBara reports *paths*, not
+        file bytes — please keep it that way in your report. Redact paths if a
+        filename itself is sensitive.
+  - type: input
+    id: techybara-version
+    attributes:
+      label: TechyBara version
+      description: Output of `techybara --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`.
+      placeholder: "v18.20.8"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 / macOS 14 / Ubuntu 22.04"
+    validations:
+      required: true
+  - type: input
+    id: git-version
+    attributes:
+      label: git version
+      description: Output of `git --version`.
+      placeholder: "git version 2.45.0"
+    validations:
+      required: true
+  - type: input
+    id: claude-code-version
+    attributes:
+      label: Claude Code version (if known)
+      placeholder: "optional"
+    validations:
+      required: false
+  - type: input
+    id: command
+    attributes:
+      label: Command or hook involved
+      description: Which TechyBara command or hook was running when this happened?
+      placeholder: "Stop hook (techybara report) / techybara init / …"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest sequence of steps that reproduces the issue.
+      placeholder: |
+        1. In a fresh repo …
+        2. Run `techybara init`
+        3. Edit a tracked file
+        4. …
+    validations:
+      required: true
+  - type: dropdown
+    id: protected-path
+    attributes:
+      label: Did this involve a protected or gitignored path?
+      description: e.g. a `.env`, key, credential, or other protected-glob match.
+      options:
+        - "No"
+        - "Yes — a protected path"
+        - "Yes — a gitignored path"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: status-output
+    attributes:
+      label: "`techybara status` output"
+      description: Paste the output of `techybara status` (it contains no file contents).
+      render: text
+    validations:
+      required: false
