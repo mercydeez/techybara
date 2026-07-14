@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/mercydeez/techybara#readme
+    about: Read the README first — install, commands, coverage, and current limitations.
+  - name: Privacy & security guidance
+    url: https://github.com/mercydeez/techybara#privacy--security
+    about: How TechyBara handles paths and file contents. Please never paste secrets, .env contents, keys, or tokens into an issue.

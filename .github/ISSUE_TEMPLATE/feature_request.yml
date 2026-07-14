@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest a change or addition to TechyBara.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        TechyBara is deliberately narrow — it observes and reports what changed,
+        locally, and gets out of the way. Requests that keep it focused are the
+        most likely to land. Please don't include secrets or private paths.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The underlying need, not just the proposed feature.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should TechyBara do?
+    validations:
+      required: true
+  - type: textarea
+    id: insufficient
+    attributes:
+      label: Why is the current behavior insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried or other approaches you weighed.
+    validations:
+      required: false
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Does this change TechyBara's deliberately narrow scope?
+      description: e.g. acting on changes, blocking sessions, policy enforcement, or supporting non–Claude Code agents.
+      options:
+        - "No — it fits the observe-and-report scope"
+        - "Maybe — worth discussing"
+        - "Yes — it broadens the scope"
+    validations:
+      required: true
