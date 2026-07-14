@@ -98,6 +98,22 @@ describe("runReport", () => {
     expect((await runReport(dir, SID)).status).toBe("reported");
   });
 
+  it("a manual (read-only) report does not consume the suppression fingerprint", async () => {
+    await writeBaseline(dir, SID);
+    writeFileSync(join(dir, "a.txt"), "two\n");
+
+    // Manual invocation (e.g. the user debugging with `techybara report`):
+    // must render, but must NOT write suppression state...
+    const manual = await runReport(dir, SID, new Date(), { persistState: false });
+    expect(manual.status).toBe("reported");
+    const top = (await getToplevel(dir))!;
+    expect(existsSync(join(top, ".techybara", "sessions", SID, "last-reported.json"))).toBe(false);
+
+    // ...so the next automatic hook report still surfaces the banner.
+    const hook = await runReport(dir, SID);
+    expect(hook.status).toBe("reported");
+  });
+
   it("honors config.ignorePaths (non-protected ignored paths stay silent)", async () => {
     mkdirSync(join(dir, ".techybara"), { recursive: true });
     writeFileSync(join(dir, ".techybara", "config.json"), JSON.stringify({ ignorePaths: ["logs/**"] }));
