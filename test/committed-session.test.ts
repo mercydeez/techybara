@@ -32,7 +32,12 @@ beforeEach(() => {
   commit("init");
 });
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 200,
+  });
 });
 
 describe("committed-during-session changes (acceptance #1)", () => {
@@ -122,7 +127,12 @@ describe("no-commit repositories (first commit during session)", () => {
       const res = await runReport(fresh, SID);
       expect(res.status).toBe("no-changes");
     } finally {
-      rmSync(fresh, { recursive: true, force: true });
+      rmSync(fresh, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 200,
+      });
     }
   });
 });
@@ -144,7 +154,9 @@ describe("large commits stay within the hook budget", () => {
     // Pre-fix this took >5s (one git spawn per path) and the hook watchdog
     // killed it silently. Batched, it comfortably fits the budget.
     expect(elapsed).toBeLessThan(4000);
-  });
+    // 30s wrapper timeout covers fixture creation, git ops, and teardown on
+    // slower CI runners; the elapsed<4000 assertion above still guards report speed.
+  }, 30000);
 
   it("marks the report degraded instead of hashing an oversized commit", async () => {
     const cfg = { ...defaultConfig(), maxFiles: 5 };
