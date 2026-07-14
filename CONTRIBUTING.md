@@ -1,8 +1,7 @@
 # Contributing to TechyBara
 
-Thanks for your interest. TechyBara is a small, deliberately narrow v0.1
-experiment — focused changes that keep it observe-and-report are the most
-welcome.
+Thanks for your interest. TechyBara is a small, deliberately narrow experiment —
+focused changes that keep it observe-and-report are the most welcome.
 
 ## Workflow
 

@@ -7,6 +7,7 @@
 *Quietly checks what actually changed.*
 
 [![npm version](https://img.shields.io/npm/v/techybara.svg)](https://www.npmjs.com/package/techybara)
+[![CI](https://img.shields.io/github/actions/workflow/status/mercydeez/techybara/ci.yml?branch=main&label=CI)](https://github.com/mercydeez/techybara/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/mercydeez/techybara.svg)](https://github.com/mercydeez/techybara/releases)
 [![node: >=18.3](https://img.shields.io/badge/node-%3E%3D18.3-brightgreen.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -365,7 +366,7 @@ never takes Claude's word for it. That's also why it can afford to ignore stdout
 entirely, which is what keeps receipts private by construction.
 
 Everything except the hook adapter is agent-agnostic by design — support for other
-agents is a possibility, not a v0.1 promise.
+agents is a possibility, not a promise.
 
 ## Development
 
@@ -389,7 +390,7 @@ TechyBara is developed with TechyBara watching.
 
 ## Feedback
 
-TechyBara is a v0.1 experiment, and the most useful thing you can do is tell me
+TechyBara is an experiment, and the most useful thing you can do is tell me
 whether it earns its place in your workflow. Especially welcome:
 
 - bug reports,

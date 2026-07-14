@@ -16,7 +16,7 @@ body:
     attributes:
       label: TechyBara version
       description: Output of `techybara --version`.
-      placeholder: "0.1.0"
+      placeholder: "0.2.0"
     validations:
       required: true
   - type: input
