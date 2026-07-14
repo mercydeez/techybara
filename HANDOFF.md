@@ -2,11 +2,12 @@
 
 > **Historical snapshot (2026-07-13) — superseded.** This document describes the
 > state at the end of the overnight build session and is kept for context only.
-> Since then: v0.1.0 was published to npm and released on GitHub, `main` is the
-> protected default branch (`overnight-dev` retired), CI runs a 3-OS × 4-Node
-> matrix with a `ci-gate` required check, and the test count has grown well past
-> the figures below. For current facts see [README.md](./README.md) and
-> [CHANGELOG.md](./CHANGELOG.md).
+> Since then: releases up to **v0.2.0** have shipped to npm and GitHub, `main` is
+> the protected default branch (`overnight-dev` retired), CI runs a 3-OS × 4-Node
+> matrix plus packed-tarball dogfooding behind a `ci-gate` required check, and the
+> tool now also records verification receipts — a capability the text below
+> predates entirely. Nothing here should be read as current. For current facts see
+> [README.md](./README.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 _Written for the engineer (you) picking this up next. Session: overnight of 2026-07-13._
 
