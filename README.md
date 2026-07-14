@@ -130,6 +130,12 @@ the **end** of a session to its **start**, so:
   agent with shell access could alter TechyBara's own config or state. It's built to
   catch the *unnoticed*, not the *hostile*.
 - **Symlinks are not followed** during the protected-path scan.
+- **The protected-path scan skips build and cache directories.** The walk never
+  descends into `.git`, `node_modules`, `.techybara`, `.next`, `dist`, `build`,
+  `out`, `coverage`, `__pycache__`, `venv`, `.venv`, `target`, or `.cache` — these
+  aren't where your own secrets live, and skipping them keeps every turn fast. A
+  *gitignored* secret inside one of them is not scanned; a git-visible one is still
+  caught through git itself.
 - **The protected-path scan has a safety limit.** The filesystem walk stops after a
   fixed number of entries so it can't stall a hook on a pathological tree. If a repo
   is large enough to hit that limit, the turn is reported as **partial verification**

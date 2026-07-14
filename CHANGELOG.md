@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- The protected-path filesystem walk no longer traverses build/cache output on
+  every turn (measured ~426 ms/turn on a 30k-file repo), and large trees no
+  longer produce false partial-verification warnings from walk truncation.
+- A manual `techybara report` no longer consumes the repeat-suppression
+  fingerprint — debugging by hand can't silence the next automatic hook banner.
+
+### Changed
+- The protected walk now skips `.next`, `dist`, `build`, `out`, `coverage`,
+  `__pycache__`, `venv`, `.venv`, `target`, and `.cache` (in addition to `.git`,
+  `node_modules`, `.techybara`). Gitignored secrets inside these directories are
+  no longer scanned; git-visible ones are still detected.
+
+### Documentation
+- `HANDOFF.md` marked as a historical snapshot and its stale `ignorePaths` note
+  corrected.
+
 ## [0.1.0] - 2026-07-14
 
 First public, experimental release.

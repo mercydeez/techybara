@@ -1,5 +1,13 @@
 # TechyBara — Overnight Engineering Handoff
 
+> **Historical snapshot (2026-07-13) — superseded.** This document describes the
+> state at the end of the overnight build session and is kept for context only.
+> Since then: v0.1.0 was published to npm and released on GitHub, `main` is the
+> protected default branch (`overnight-dev` retired), CI runs a 3-OS × 4-Node
+> matrix with a `ci-gate` required check, and the test count has grown well past
+> the figures below. For current facts see [README.md](./README.md) and
+> [CHANGELOG.md](./CHANGELOG.md).
+
 _Written for the engineer (you) picking this up next. Session: overnight of 2026-07-13._
 
 ## 1. Executive summary
@@ -71,9 +79,9 @@ Key decisions and their rationale live in the plan file at
 - **Dev-dependency vulnerabilities** reported by `npm audit` (vitest→esbuild chain).
   They do **not** ship (runtime deps are zero; only `dist/` is published). Do not run
   `npm audit fix --force` — it can break the toolchain. Revisit by bumping vitest.
-- **`config.ignorePaths` is not yet enforced** in the snapshot. Git's own ignore
-  rules + the `maxFiles` cap cover the important cases; `.techybara/` is hard-excluded
-  regardless. Wiring the glob is a small follow-up (the matcher already exists).
+- ~~**`config.ignorePaths` is not yet enforced** in the snapshot.~~ **Fixed** in
+  `9499d16` — `ignorePaths` is enforced in both the snapshot and the
+  committed-changes path, with protected paths winning over ignore rules.
 - **`init` uses `process.cwd()`** for the state dir while snapshot/report use the git
   top-level. They align when `init` is run from the repo root (the documented flow).
   Running `init` from a subdirectory would misplace config — worth hardening.
