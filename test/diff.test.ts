@@ -105,16 +105,45 @@ describe("deltaFingerprint", () => {
 describe("renderOneLine", () => {
   it("returns null when nothing changed (suppression)", () => {
     const d = computeDelta(snap({}), snap({}));
-    expect(renderOneLine(d)).toBeNull();
+    expect(renderOneLine(d, d)).toBeNull();
   });
 
-  it("summarizes counts and protected paths", () => {
+  it("summarizes turn counts, session total and protected paths", () => {
     const d = computeDelta(snap({}), snap({ ".env": e("x", "??"), "a.txt": e("y", "??") }), {
       isProtected: (p) => p === ".env",
     });
-    const line = renderOneLine(d)!;
-    expect(line).toContain("2 files changed");
+    const line = renderOneLine(d, d)!;
+    expect(line).toContain("Turn: 2 changed");
+    expect(line).toContain("Session: 2 changed");
     expect(line).toContain("protected: .env");
+  });
+
+  it("distinguishes a quiet turn inside a busy session", () => {
+    const turn = computeDelta(snap({}), snap({}));
+    const session = computeDelta(snap({}), snap({ "a.txt": e("y", "??"), "b.txt": e("z", "??") }));
+    const line = renderOneLine(turn, session)!;
+    expect(line).toContain("Turn: 0 changed");
+    expect(line).toContain("Session: 2 changed");
+  });
+
+  it("appends observed verification, worst outcome per category", () => {
+    const d = computeDelta(snap({}), snap({ "a.txt": e("y", "??") }));
+    const line = renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "success", at: "2026-07-13T00:00:01.000Z" },
+      { version: 1, category: "lint", outcome: "fail", at: "2026-07-13T00:00:02.000Z" },
+    ])!;
+    expect(line).toContain("✓ test");
+    expect(line).toContain("✗ lint");
+  });
+
+  it("stays silent on an unchanged turn even when a command was observed", () => {
+    // The command's own output is already on screen; a banner would be noise.
+    const d = computeDelta(snap({}), snap({}));
+    expect(
+      renderOneLine(d, d, [
+        { version: 1, category: "test", outcome: "fail", at: "2026-07-13T00:00:01.000Z" },
+      ]),
+    ).toBeNull();
   });
 });
 
@@ -123,24 +152,74 @@ describe("renderMarkdown", () => {
     sessionId: "sess-1",
     generatedAt: "2026-07-13T01:00:00.000Z",
     baselineAt: "2026-07-13T00:00:00.000Z",
+    turnNumber: 1,
+    turnReceipts: [],
+    sessionReceipts: [],
   };
 
   it("renders a clean 'no changes' report", () => {
-    const md = renderMarkdown(computeDelta(snap({}), snap({})), meta);
+    const d = computeDelta(snap({}), snap({}));
+    const md = renderMarkdown(d, d, meta);
     expect(md).toContain("No files changed during this session.");
   });
 
-  it("renders protected section and file groups", () => {
+  it("renders protected section and category groups", () => {
     const d = computeDelta(
       snap({}),
       snap({ ".env": e("x", "??"), "src/a.ts": e("y", "??"), "old.ts": e(null, " D") }),
       { isProtected: (p) => p === ".env" },
     );
-    const md = renderMarkdown(d, meta);
+    const md = renderMarkdown(d, d, meta);
     expect(md).toContain("Protected paths changed");
     expect(md).toContain("`.env`");
-    expect(md).toContain("Added (2)");
-    expect(md).toContain("Deleted (1)");
-    expect(md).toContain("never inspects file");
+    expect(md).toContain("Session changes by category");
+    expect(md).toContain("Source (3)");
+    expect(md).toContain("never inspects, stores, or displays file contents");
+  });
+
+  it("groups by risk category with factual wording, never 'safe'", () => {
+    const d = computeDelta(
+      snap({}),
+      snap({
+        "package.json": e("x", ".M"),
+        ".github/workflows/ci.yml": e("y", ".M"),
+        "src/index.ts": e("z", ".M"),
+      }),
+    );
+    const md = renderMarkdown(d, d, meta);
+    expect(md).toContain("Dependency definitions (1)");
+    expect(md).toContain("Dependency definition changed — review recommended.");
+    expect(md).toContain("CI/CD workflows (1)");
+    expect(md).toContain("Source (1)");
+    expect(md).not.toContain("safe");
+  });
+
+  it("states plainly when no verification was observed", () => {
+    const d = computeDelta(snap({}), snap({ "src/a.ts": e("y", "??") }));
+    const md = renderMarkdown(d, d, meta);
+    expect(md).toContain("Verification not observed for this turn.");
+  });
+
+  it("reports an observed outcome without claiming more than the tool result", () => {
+    const d = computeDelta(snap({}), snap({ "src/a.ts": e("y", "??") }));
+    const md = renderMarkdown(d, d, {
+      ...meta,
+      turnReceipts: [
+        { version: 1, category: "test", outcome: "success", at: "2026-07-13T00:30:00.000Z" },
+      ],
+      sessionReceipts: [
+        { version: 1, category: "test", outcome: "success", at: "2026-07-13T00:30:00.000Z" },
+      ],
+    });
+    expect(md).toContain("reported success by the tool result");
+    expect(md).not.toContain("Verification not observed");
+  });
+
+  it("separates what changed earlier in the session from the latest turn", () => {
+    const turn = computeDelta(snap({}), snap({ "new.ts": e("n", "??") }));
+    const session = computeDelta(snap({}), snap({ "new.ts": e("n", "??"), "old.ts": e("o", "??") }));
+    const md = renderMarkdown(turn, session, meta);
+    expect(md).toContain("Changed earlier this session (unchanged in the latest turn)");
+    expect(md).toContain("`old.ts`");
   });
 });

@@ -10,6 +10,7 @@
 // current signature. This makes reverts (dirty -> clean) and re-dirtying
 // (clean -> dirty) fall out of a single comparison.
 import { createHash } from "node:crypto";
+import { categoryOf, type FileCategory } from "./category.js";
 import type { Snapshot, SnapshotEntry } from "./types.js";
 
 export type ChangeKind = "added" | "modified" | "deleted";
@@ -18,6 +19,8 @@ export interface FileChange {
   path: string;
   kind: ChangeKind;
   protected: boolean;
+  /** Deterministic risk category, derived purely from the path. */
+  category: FileCategory;
 }
 
 export interface SessionDelta {
@@ -97,7 +100,7 @@ export function computeDelta(
     const kind = classify(bs, cs, b, c);
     const isProt = isProtected(path);
     if (isProt) protectedSet.add(path);
-    changes.push({ path, kind, protected: isProt });
+    changes.push({ path, kind, protected: isProt, category: categoryOf(path) });
   }
 
   changes.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
@@ -130,6 +133,15 @@ export function computeDelta(
 /**
  * Stable fingerprint of the *reportable* content of a delta, used to suppress
  * repeat reports on turns where nothing changed since the last one.
+ *
+ * `category` is deliberately absent: it is a pure function of `path` (see
+ * category.ts), so it cannot differ between two deltas that agree on paths.
+ * Keep it that way — if categories ever become configurable, they must be
+ * hashed here, or an edited category table would change the report without
+ * changing the fingerprint and the report would be wrongly suppressed.
+ *
+ * Verification receipts are also absent, and that omission is NOT safe to
+ * ignore: report/run.ts combines this hash with the turn's receipt summary.
  */
 export function deltaFingerprint(delta: SessionDelta): string {
   const material = JSON.stringify({

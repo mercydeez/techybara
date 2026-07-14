@@ -8,6 +8,8 @@ import { writeBaseline } from "./core/snapshot.js";
 import { gitAvailable, getToplevel } from "./core/git.js";
 import { readHookInput, emitSystemMessage, installWatchdog } from "./hooks/adapter.js";
 import { runReport } from "./report/run.js";
+import { classifyCommand, writeReceipt } from "./report/receipt.js";
+import { buildJsonError, buildJsonReport } from "./report/json.js";
 
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
 
@@ -16,6 +18,8 @@ Usage:
   techybara uninstall [--purge]  Remove TechyBara hooks (--purge also deletes .techybara/ state)
   techybara snapshot             Capture a baseline of the working tree (run by the SessionStart hook)
   techybara report [--hook]      Show what changed since the baseline (run by the Stop hook)
+  techybara report --json        Same, as machine-readable JSON on stdout (for agents and CI)
+  techybara receipt --ok|--fail  Record an observed verification (run by the PostToolUse hooks)
   techybara status               Explain whether TechyBara can run here (git present, in a repo, etc.)
 
 Flags:
@@ -24,9 +28,16 @@ Flags:
 
 TechyBara is local-first and never makes network calls.`;
 
-type CommandName = "init" | "uninstall" | "snapshot" | "report" | "status";
+type CommandName = "init" | "uninstall" | "snapshot" | "report" | "receipt" | "status";
 
-const COMMANDS: readonly CommandName[] = ["init", "uninstall", "snapshot", "report", "status"];
+const COMMANDS: readonly CommandName[] = [
+  "init",
+  "uninstall",
+  "snapshot",
+  "report",
+  "receipt",
+  "status",
+];
 
 function isCommand(value: string | undefined): value is CommandName {
   return value !== undefined && (COMMANDS as readonly string[]).includes(value);
@@ -61,6 +72,8 @@ export async function run(argv: readonly string[]): Promise<number> {
       return cmdSnapshot(rest);
     case "report":
       return cmdReport(rest);
+    case "receipt":
+      return cmdReceipt(rest);
     case "status":
       return cmdStatus();
   }
@@ -87,7 +100,15 @@ function safeLogError(cwd: string, err: unknown): void {
  * hook payload on stdin (falling back to argv for manual runs). Always exits 0.
  */
 async function cmdSnapshot(args: readonly string[]): Promise<number> {
-  installWatchdog(5000);
+  const stopWatchdog = installWatchdog(5000);
+  try {
+    return await snapshotBody(args);
+  } finally {
+    stopWatchdog();
+  }
+}
+
+async function snapshotBody(args: readonly string[]): Promise<number> {
   const hook = await readHookInput();
   const isHook = hook !== null || args.includes("--hook");
   const cwd = hook?.cwd ?? process.cwd();
@@ -118,20 +139,125 @@ async function cmdSnapshot(args: readonly string[]): Promise<number> {
 }
 
 /**
+ * PostToolUse / PostToolUseFailure hook (fires after every Bash call): record a
+ * verification receipt.
+ *
+ * The outcome is decided by WHICH EVENT FIRED, not by inspecting output:
+ * `--ok` is registered on PostToolUse (which fires only after a tool call
+ * succeeds) and `--fail` on PostToolUseFailure (only after one fails). We never
+ * read stdout, stderr, or an exit code.
+ *
+ * This runs on the hot path, so it does as little as possible and bails early:
+ * classification happens before any git spawn, so an `ls` costs one short-lived
+ * Node process and nothing else. Always exits 0.
+ */
+async function cmdReceipt(args: readonly string[]): Promise<number> {
+  const ok = args.includes("--ok");
+  const fail = args.includes("--fail");
+  // Ambiguous or missing outcome: record nothing rather than guess. Uncertainty
+  // must never be converted into a receipt.
+  if (ok === fail) return 0;
+
+  const stopWatchdog = installWatchdog(2000);
+  try {
+    return await receiptBody(args, ok);
+  } finally {
+    stopWatchdog();
+  }
+}
+
+async function receiptBody(args: readonly string[], ok: boolean): Promise<number> {
+  const hook = await readHookInput();
+  const cwd = hook?.cwd ?? process.cwd();
+  try {
+    // The matcher should already restrict us to Bash, but never trust that a
+    // payload is what we asked for.
+    if (hook?.toolName !== undefined && hook.toolName !== "Bash") return 0;
+    if (!hook?.command) return 0;
+
+    const classification = classifyCommand(hook.command);
+    if (!classification) return 0; // not a verification command: no receipt at all
+
+    const top = await getToplevel(cwd);
+    if (!top) return 0;
+    const sessionId = hook.sessionId ?? flagValue(args, "--session") ?? "manual";
+    writeReceipt(top, sessionId, classification, {
+      succeeded: ok,
+      // An interrupted command never reached a verdict; it must not read as a
+      // failed test.
+      ...(hook.isInterrupt !== undefined ? { interrupted: hook.isInterrupt } : {}),
+      // Claude Code's own measurement — we never estimate it ourselves.
+      ...(hook.durationMs !== undefined ? { durationMs: hook.durationMs } : {}),
+    });
+    return 0;
+  } catch (err) {
+    safeLogError(cwd, err);
+    return 0; // never break the session
+  }
+}
+
+/**
  * Stop hook (fires every turn): report what changed since the baseline. Emits a
  * one-line systemMessage only when something changed since the last report.
  * Always exits 0 — critically, never 2, which would block Claude from stopping.
  */
 async function cmdReport(args: readonly string[]): Promise<number> {
-  installWatchdog(5000, "🦫 ⚠️ TechyBara timed out and could not verify this turn.");
-  const hook = await readHookInput();
-  const isHook = hook !== null || args.includes("--hook");
-  const cwd = hook?.cwd ?? process.cwd();
+  const json = args.includes("--json");
+
+  // `--hook` emits a systemMessage on stdout; `--json` owns stdout. Refusing is
+  // better than silently letting one corrupt the other.
+  if (json && args.includes("--hook")) {
+    process.stderr.write(`techybara: --json cannot be combined with --hook\n`);
+    return 2;
+  }
+  const sessionIdForTimeout = flagValue(args, "--session") ?? "manual";
+  // A timeout must still produce a parseable answer on the channel the caller is
+  // listening to. In --json mode a systemMessage would corrupt the document, and
+  // exiting silently would hand a consumer empty stdout with a success code —
+  // indistinguishable from "nothing to report". Emit an error document instead,
+  // and exit non-zero: `--json` is never a hook (we reject --hook above), so a
+  // non-zero exit cannot disrupt a session.
+  const stopWatchdog = installWatchdog(
+    5000,
+    json
+      ? () =>
+          process.stdout.write(
+            JSON.stringify(
+              buildJsonError(
+                sessionIdForTimeout,
+                new Date().toISOString(),
+                "timed out after 5000ms; the report is incomplete",
+              ),
+              null,
+              2,
+            ) + "\n",
+          )
+      : () => emitSystemMessage("🦫 ⚠️ TechyBara timed out and could not verify this turn."),
+    json ? 1 : 0,
+  );
   try {
-    const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
+    return await reportBody(args, json);
+  } finally {
+    stopWatchdog();
+  }
+}
+
+async function reportBody(args: readonly string[], json: boolean): Promise<number> {
+  const hook = await readHookInput();
+  const isHook = !json && (hook !== null || args.includes("--hook"));
+  const cwd = hook?.cwd ?? process.cwd();
+  const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
+  try {
     // Manual runs are read-only w.r.t. suppression state: a user debugging with
-    // `techybara report` must not silence the next automatic hook banner.
+    // `techybara report` must not silence the next automatic hook banner, or
+    // consume a turn that the real Stop hook should see.
     const res = await runReport(cwd, sessionId, new Date(), { persistState: isHook });
+
+    if (json) {
+      const doc = buildJsonReport(res, sessionId, new Date().toISOString(), res.baselineAt);
+      process.stdout.write(JSON.stringify(doc, null, 2) + "\n");
+      return 0;
+    }
 
     if (isHook) {
       if (res.status === "reported" && res.oneLine) {
@@ -142,8 +268,14 @@ async function cmdReport(args: readonly string[]): Promise<number> {
         emitSystemMessage(
           "🦫 ⚠️ Session baseline was missing or unreadable — re-established now. Changes made before this point may not be reported.",
         );
+      } else if (res.status === "git-unavailable") {
+        // Without git nothing can be verified. Silence here would be read as
+        // "nothing changed" for the rest of the session.
+        emitSystemMessage(
+          "🦫 ⚠️ git could not be run — TechyBara cannot verify anything in this session. Run `techybara status`.",
+        );
       }
-      // every other status is silent by design
+      // every other status (including not-a-repo) is silent by design
       return 0;
     }
 
@@ -151,6 +283,11 @@ async function cmdReport(args: readonly string[]): Promise<number> {
     switch (res.status) {
       case "not-a-repo":
         process.stderr.write(`techybara: not a git repository\n`);
+        break;
+      case "git-unavailable":
+        process.stderr.write(
+          `techybara: git could not be run — TechyBara cannot verify anything here\n`,
+        );
         break;
       case "baseline-missing":
         process.stderr.write(`techybara: no baseline for this session yet (re-established now)\n`);
@@ -161,6 +298,16 @@ async function cmdReport(args: readonly string[]): Promise<number> {
     return 0;
   } catch (err) {
     safeLogError(cwd, err);
+    if (json) {
+      // A JSON consumer must never get empty stdout and a zero exit. Emit a
+      // valid error document on stdout, diagnostics on stderr.
+      process.stderr.write(`techybara: ${String(err)}\n`);
+      process.stdout.write(
+        JSON.stringify(buildJsonError(sessionId, new Date().toISOString(), String(err)), null, 2) +
+          "\n",
+      );
+      return 1;
+    }
     if (isHook) {
       // Don't fail silently: tell the user this turn wasn't verified.
       emitSystemMessage("🦫 ⚠️ TechyBara could not verify this turn. Run `techybara status`.");
@@ -183,10 +330,15 @@ async function cmdStatus(): Promise<number> {
   return 0;
 }
 
+/**
+ * A v0.1 install has the Stop hook but no receipt hooks, so verification would
+ * silently never be observed. Report that as "not installed" rather than
+ * "installed", so `status` prompts the re-init that actually fixes it.
+ */
 function hooksInstalled(cwd: string): boolean {
   try {
     const text = readFileSync(join(cwd, ".claude", "settings.json"), "utf8");
-    return text.includes("report --hook");
+    return text.includes("report --hook") && text.includes("receipt --ok");
   } catch {
     return false;
   }

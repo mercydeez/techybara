@@ -76,10 +76,17 @@ describe("protected-walk truncation surfaces as partial verification", () => {
     });
     expect(delta.changes.length).toBe(0); // nothing else changed this "session"
     expect(delta.degraded).toBe(true);
-    const one = renderOneLine(delta);
+    const one = renderOneLine(delta, delta);
     expect(one).not.toBeNull(); // MUST NOT be silent
     expect(one!).toMatch(/Partial/);
-    const md = renderMarkdown(delta, { sessionId: SID, generatedAt: "now", baselineAt: "then" });
+    const md = renderMarkdown(delta, delta, {
+      sessionId: SID,
+      generatedAt: "now",
+      baselineAt: "then",
+      turnNumber: 1,
+      turnReceipts: [],
+      sessionReceipts: [],
+    });
     expect(md).toMatch(/[Pp]rotected-path verification was incomplete/);
   });
 

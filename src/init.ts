@@ -20,6 +20,41 @@ import { writeFileAtomic } from "./core/fsutil.js";
 
 const HOOK_TIMEOUT_SECONDS = 10;
 
+/** The subcommand each hook event invokes. Widen HookSub when adding one. */
+type HookSub = "snapshot" | "report --hook" | "receipt --ok" | "receipt --fail";
+
+/**
+ * Every hook TechyBara owns, in one place. `init` and `uninstall` both iterate
+ * this table, so registration and removal cannot drift apart — the class of bug
+ * where a newly registered hook is orphaned by uninstall is eliminated by
+ * construction rather than remembered.
+ *
+ * `matcher` restricts an event to one tool. Omitting it on PostToolUse would
+ * fire the receipt hook after *every* tool call — every Read, Edit and Glob —
+ * instead of just Bash.
+ */
+const OUR_HOOKS: readonly { event: string; sub: HookSub; matcher?: string }[] = [
+  { event: "SessionStart", sub: "snapshot" },
+  { event: "Stop", sub: "report --hook" },
+  // Which event fires IS the verification outcome: PostToolUse fires only after
+  // a tool call succeeds, PostToolUseFailure only after one fails.
+  { event: "PostToolUse", sub: "receipt --ok", matcher: "Bash" },
+  { event: "PostToolUseFailure", sub: "receipt --fail", matcher: "Bash" },
+];
+
+// StopFailure is deliberately NOT registered. When a turn ends in an API error,
+// Stop does not fire and StopFailure does — but its output and exit code are
+// ignored by Claude Code, so a hook there could not tell the user anything.
+//
+// The tempting move is to register it anyway "for the record". That would be
+// worse: processing the turn advances the checkpoint, so the turn's changes
+// would quietly become "changed earlier this session" and never get a banner.
+// By staying out, the checkpoint does not advance, and the next successful Stop
+// reports the union of both turns. That over-reports rather than under-reports,
+// which is the only direction this tool is allowed to be wrong in.
+
+const OUR_SUBS: readonly HookSub[] = OUR_HOOKS.map((h) => h.sub);
+
 export interface InitOptions {
   /** Project root to install into. */
   cwd: string;
@@ -49,20 +84,40 @@ function hookCommand(cliPath: string, sub: string): string {
 }
 
 /**
+ * Each pattern is anchored to a specific TechyBara subcommand, deliberately.
+ *
+ * A tempting "simplification" is to match any `cli.js <anything>` — do NOT.
+ * Plenty of tools ship a `cli.js`, so a user's own hook running
+ * `node "./node_modules/eslint/cli.js" --fix` would match, and `uninstall`
+ * would silently delete it. Recognition must stay narrow enough that a false
+ * positive is impossible.
+ */
+const SUB_TAIL: Record<HookSub, RegExp> = {
+  snapshot: /cli\.js"?\s+snapshot\s*$/,
+  "report --hook": /cli\.js"?\s+report\s+--hook\s*$/,
+  "receipt --ok": /cli\.js"?\s+receipt\s+--ok\s*$/,
+  "receipt --fail": /cli\.js"?\s+receipt\s+--fail\s*$/,
+};
+
+/**
  * Recognize a hook command previously written by TechyBara, independent of
  * where the install lives, so re-init can replace it instead of duplicating.
  */
-function isOurCommand(command: unknown, sub: "snapshot" | "report --hook"): boolean {
+function isOurCommand(command: unknown, sub: HookSub): boolean {
   if (typeof command !== "string") return false;
-  const tail = sub === "snapshot" ? /cli\.js"?\s+snapshot\s*$/ : /cli\.js"?\s+report\s+--hook\s*$/;
-  return tail.test(command.trim());
+  return SUB_TAIL[sub].test(command.trim());
 }
 
 /**
  * Merge one event's hook groups: drop any prior TechyBara hook, keep everyone
  * else's, then append a fresh group of ours. Returns the new array.
  */
-function mergeEventHooks(existing: unknown, sub: "snapshot" | "report --hook", command: string): unknown[] {
+function mergeEventHooks(
+  existing: unknown,
+  sub: HookSub,
+  command: string,
+  matcher?: string,
+): unknown[] {
   const groups: unknown[] = Array.isArray(existing) ? [...existing] : [];
   const kept: unknown[] = [];
 
@@ -81,8 +136,11 @@ function mergeEventHooks(existing: unknown, sub: "snapshot" | "report --hook", c
     }
   }
 
-  const fresh: { hooks: CommandHook[] } = {
-    hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_SECONDS }],
+  // Conditional spread: events without a matcher keep exactly the shape they
+  // had before receipts existed.
+  const fresh = {
+    ...(matcher ? { matcher } : {}),
+    hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_SECONDS }] as CommandHook[],
   };
   kept.push(fresh);
   return kept;
@@ -135,10 +193,13 @@ export function init(opts: InitOptions): InitResult {
       ? { ...(settings.hooks as Record<string, unknown>) }
       : {};
 
-  hooks.SessionStart = mergeEventHooks(hooks.SessionStart, "snapshot", hookCommand(cliPath, "snapshot"));
-  hooks.Stop = mergeEventHooks(hooks.Stop, "report --hook", hookCommand(cliPath, "report --hook"));
+  for (const { event, sub, matcher } of OUR_HOOKS) {
+    hooks[event] = mergeEventHooks(hooks[event], sub, hookCommand(cliPath, sub), matcher);
+  }
   settings.hooks = hooks;
-  changes.push(`Register SessionStart + Stop hooks in ${settingsPath}`);
+  changes.push(
+    `Register ${OUR_HOOKS.map((h) => h.event).join(" + ")} hooks in ${settingsPath}`,
+  );
 
   // --- 2. Default config (never clobber an existing one) ---
   const configExists = existsSync(configPath);
@@ -201,8 +262,15 @@ export function uninstall(opts: { cwd: string; purge: boolean }): UninstallResul
       const hooks = settings.hooks;
       if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
         const h = hooks as Record<string, unknown>;
-        removedHooks = stripOurHooks(h, "SessionStart", "snapshot") || removedHooks;
-        removedHooks = stripOurHooks(h, "Stop", "report --hook") || removedHooks;
+        // Sweep EVERY event key against EVERY sub we have ever registered,
+        // rather than only the (event, sub) pairs we currently install. That way
+        // a hook written by an older version — or one a user moved to another
+        // event — is still removed instead of orphaned.
+        for (const event of Object.keys(h)) {
+          for (const sub of OUR_SUBS) {
+            removedHooks = stripOurHooks(h, event, sub) || removedHooks;
+          }
+        }
         if (Object.keys(h).length === 0) delete settings.hooks;
       }
       if (removedHooks) {
@@ -227,11 +295,7 @@ export function uninstall(opts: { cwd: string; purge: boolean }): UninstallResul
 }
 
 /** Drop our hook from one event's groups; returns true if anything was removed. */
-function stripOurHooks(
-  hooksObj: Record<string, unknown>,
-  event: string,
-  sub: "snapshot" | "report --hook",
-): boolean {
+function stripOurHooks(hooksObj: Record<string, unknown>, event: string, sub: HookSub): boolean {
   const arr = hooksObj[event];
   if (!Array.isArray(arr)) return false;
   let removed = false;

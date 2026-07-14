@@ -45,29 +45,52 @@ jobs:
       - run: npm ci
       - run: npm run build
       # Inspects the real packed tarball: required files present, no forbidden leaks.
-      - run: node scripts/verify-pack.mjs
+      - run: npm run verify-pack
+
+  # Installs the packed tarball into a throwaway repo and drives the real hook
+  # lifecycle. Runs on both POSIX and Windows because the state layer does
+  # path handling and atomic renames that differ meaningfully between them.
+  dogfood:
+    name: dogfood (${{ matrix.os }} · node 22)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run dogfood
 
   # Single stable context for branch protection: succeeds only when the whole
-  # test matrix and package verification succeeded. Rulesets require "ci-gate"
-  # instead of 13 individual matrix labels that break on any rename.
+  # test matrix, package verification, and dogfood succeeded. Rulesets require
+  # "ci-gate" instead of individual matrix labels that break on any rename.
   ci-gate:
     name: ci-gate
     if: ${{ always() }}
     needs:
       - test
       - package-verify
+      - dogfood
     runs-on: ubuntu-latest
     steps:
       - name: Verify required CI jobs
         env:
           TEST_RESULT: ${{ needs.test.result }}
           PACKAGE_RESULT: ${{ needs.package-verify.result }}
+          DOGFOOD_RESULT: ${{ needs.dogfood.result }}
         run: |
           echo "test: $TEST_RESULT"
           echo "package-verify: $PACKAGE_RESULT"
+          echo "dogfood: $DOGFOOD_RESULT"
 
           if [ "$TEST_RESULT" != "success" ] ||
-             [ "$PACKAGE_RESULT" != "success" ]; then
+             [ "$PACKAGE_RESULT" != "success" ] ||
+             [ "$DOGFOOD_RESULT" != "success" ]; then
             echo "One or more required CI jobs did not succeed."
             exit 1
           fi

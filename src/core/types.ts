@@ -3,6 +3,8 @@
 
 export const SNAPSHOT_VERSION = 1;
 
+export const CHECKPOINT_VERSION = 1;
+
 export interface SnapshotEntry {
   /** Two-character porcelain-v2 status code (e.g. "M.", ".M", "??", "AD"). */
   xy: string;
@@ -25,4 +27,24 @@ export interface Snapshot {
   note?: string;
   /** Map of repo-root-relative path -> entry, for all files dirty/untracked vs HEAD. */
   entries: Record<string, SnapshotEntry>;
+}
+
+/**
+ * The working tree as of the end of the last *fully processed* turn. Diffing
+ * against this yields the turn delta; diffing against baseline.json yields the
+ * session delta.
+ *
+ * The snapshot stored here is always the RAW capture, never one that has been
+ * through mergeCommittedChanges: a merged snapshot carries synthetic "M@"/"A@"
+ * entries for paths that are clean at that HEAD, which the next turn would read
+ * as spurious modifications. The `head` pointer is the only state the next turn
+ * needs — committed content is reconstructed from it on demand.
+ *
+ * `snapshot.createdAt` doubles as the turn boundary for verification receipts.
+ */
+export interface Checkpoint {
+  version: number;
+  /** 1-based index of the turn this checkpoint closed. */
+  turn: number;
+  snapshot: Snapshot;
 }

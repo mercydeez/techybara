@@ -24,7 +24,17 @@ const isAllowed = (p) =>
 const REQUIRED = ["package.json", "README.md", "LICENSE", "assets/techybara.png"];
 // Stable dist entry points that must always be present; a missing one means a
 // broken/partial build. (Not an exhaustive list — new modules don't break this.)
-const REQUIRED_DIST = ["dist/cli.js", "dist/init.js", "dist/report/run.js", "dist/core/snapshot.js"];
+const REQUIRED_DIST = [
+  "dist/cli.js",
+  "dist/init.js",
+  "dist/report/run.js",
+  "dist/core/snapshot.js",
+  // Trust Receipts: shipping without these would silently disable verification
+  // receipts, risk classification, or the machine-readable report.
+  "dist/report/receipt.js",
+  "dist/report/json.js",
+  "dist/core/category.js",
+];
 const MIN_DIST_JS = 10; // a nearly-empty dist/ must fail loudly, not ship silently
 
 // --- helpers ------------------------------------------------------------------

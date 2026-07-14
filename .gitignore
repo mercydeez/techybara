@@ -3,3 +3,8 @@ dist/
 *.log
 .techybara/
 .DS_Store
+
+# TechyBara's own Claude Code hooks point at dist/, which is built, not committed.
+# A committed settings.json would therefore fail on every turn in a fresh clone
+# until someone ran a build — so dogfooding here is opt-in: `npm run dogfood:init`.
+.claude/
