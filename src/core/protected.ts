@@ -9,8 +9,30 @@ import { readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { compileGlobs } from "./glob.js";
 
-/** Directory names we never descend into during the protected walk. */
-const PRUNE_DIRS = new Set([".git", "node_modules", ".techybara"]);
+/**
+ * Directory names we never descend into during the protected walk: VCS/state
+ * dirs plus common build/cache/vendor output. These are not where a user's own
+ * secrets live, and walking them taxes every turn (a Next.js .next/ alone can
+ * hold thousands of files) and can push large repos into false truncation.
+ * Git-visible protected files inside them are still caught via the porcelain
+ * path in captureSnapshot — only *gitignored* secrets inside these dirs are
+ * out of the walk's scope.
+ */
+const PRUNE_DIRS = new Set([
+  ".git",
+  "node_modules",
+  ".techybara",
+  ".next",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  "__pycache__",
+  "venv",
+  ".venv",
+  "target",
+  ".cache",
+]);
 
 /** Hard cap on entries visited, so a pathological tree cannot stall a hook. */
 const MAX_WALK_ENTRIES = 50_000;

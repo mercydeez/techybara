@@ -129,7 +129,9 @@ async function cmdReport(args: readonly string[]): Promise<number> {
   const cwd = hook?.cwd ?? process.cwd();
   try {
     const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
-    const res = await runReport(cwd, sessionId);
+    // Manual runs are read-only w.r.t. suppression state: a user debugging with
+    // `techybara report` must not silence the next automatic hook banner.
+    const res = await runReport(cwd, sessionId, new Date(), { persistState: isHook });
 
     if (isHook) {
       if (res.status === "reported" && res.oneLine) {

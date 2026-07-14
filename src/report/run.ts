@@ -27,12 +27,22 @@ export interface ReportRunResult {
   markdown?: string;
 }
 
+export interface ReportOptions extends CaptureOptions {
+  /**
+   * When false (manual `techybara report` runs), the suppression fingerprint is
+   * neither written nor cleared — a debugging invocation must not silence the
+   * next automatic hook banner. Defaults to true (hook behavior).
+   */
+  persistState?: boolean;
+}
+
 export async function runReport(
   cwd: string,
   sessionId: string,
   now: Date = new Date(),
-  opts: CaptureOptions = {},
+  opts: ReportOptions = {},
 ): Promise<ReportRunResult> {
+  const persistState = opts.persistState ?? true;
   const top = await getToplevel(cwd);
   if (!top) return { status: "not-a-repo" };
 
@@ -69,10 +79,12 @@ export async function runReport(
     // The tree is back at (or never left) the session baseline. Clear the
     // suppression fingerprint so a later re-divergence — even one identical to
     // an earlier reported state — is reported again rather than silenced.
-    try {
-      rmSync(reportStatePath(top, sessionId), { force: true });
-    } catch {
-      // best-effort; a stale fingerprint only risks one suppressed repeat
+    if (persistState) {
+      try {
+        rmSync(reportStatePath(top, sessionId), { force: true });
+      } catch {
+        // best-effort; a stale fingerprint only risks one suppressed repeat
+      }
     }
     return { status: "no-changes", markdown };
   }
@@ -88,7 +100,9 @@ export async function runReport(
     return { status: "suppressed", oneLine, markdown };
   }
 
-  writeFileAtomic(statePath, JSON.stringify({ fingerprint }) + "\n");
+  if (persistState) {
+    writeFileAtomic(statePath, JSON.stringify({ fingerprint }) + "\n");
+  }
   return { status: "reported", oneLine, markdown };
 }
 

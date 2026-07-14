@@ -59,6 +59,29 @@ describe("findProtectedFiles", () => {
     const { paths } = findProtectedFiles(dir, defaultConfig().protectedPaths);
     expect(paths).not.toContain("node_modules/pkg/.env");
   });
+
+  it("does not descend into build/cache dirs (.next, venv, __pycache__, dist)", () => {
+    for (const d of [".next", "venv", "__pycache__", "dist"]) {
+      mkdirSync(join(dir, d, "sub"), { recursive: true });
+      writeFileSync(join(dir, d, "sub", ".env"), "x\n");
+    }
+    writeFileSync(join(dir, ".env"), "root secret\n"); // root secret must still be found
+    const { paths } = findProtectedFiles(dir, defaultConfig().protectedPaths);
+    expect(paths).toContain(".env");
+    expect(paths.filter((p) => p !== ".env")).toEqual([]);
+  });
+
+  it("pruned dirs do not count toward the walk entry cap (no false truncation)", () => {
+    // 100 files inside .next would blow a 50-entry cap if walked; pruned, the
+    // walk visits only a handful of entries and must NOT report truncation.
+    mkdirSync(join(dir, ".next"), { recursive: true });
+    for (let i = 0; i < 100; i++) writeFileSync(join(dir, ".next", `chunk${i}.js`), "x");
+    writeFileSync(join(dir, ".env"), "s\n");
+
+    const res = findProtectedFiles(dir, defaultConfig().protectedPaths, 50);
+    expect(res.truncated).toBe(false);
+    expect(res.paths).toContain(".env");
+  });
 });
 
 describe("flagship: gitignored .env change is caught and never leaked", () => {
