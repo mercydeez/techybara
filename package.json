@@ -1,6 +1,6 @@
 {
   "name": "techybara",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Independent, local-first verification of what a Claude Code session actually changed.",
   "type": "module",
   "bin": {

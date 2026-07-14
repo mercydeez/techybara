@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-14
+
 ### Fixed
 - The protected-path filesystem walk no longer traverses build/cache output on
   every turn (measured ~426 ms/turn on a 30k-file repo), and large trees no
@@ -53,5 +55,6 @@ no change attribution, symlinks skipped in the protected scan, and more). See
 [What TechyBara cannot see](./README.md#what-techybara-cannot-see) rather than
 duplicating them here.
 
-[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mercydeez/techybara/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mercydeez/techybara/releases/tag/v0.1.0
