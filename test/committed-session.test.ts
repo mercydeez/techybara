@@ -72,7 +72,7 @@ describe("committed-during-session changes (acceptance #1)", () => {
 
     const res = await runReport(dir, SID);
     expect(res.status).toBe("reported");
-    expect(res.oneLine).toContain("3 files changed");
+    expect(res.oneLine).toContain("Session: 3 changed");
     for (const f of ["a.txt", "b.txt", "c.txt"]) {
       expect(res.markdown).toContain(f);
     }
@@ -86,7 +86,7 @@ describe("committed-during-session changes (acceptance #1)", () => {
     const res = await runReport(dir, SID);
     expect(res.status).toBe("reported");
     expect(res.markdown).toContain("new.txt");
-    expect(res.markdown).toContain("Added");
+    expect(res.markdown).toContain("`new.txt` — added");
   });
 
   it("reports a file deleted and committed during the session", async () => {
@@ -97,7 +97,7 @@ describe("committed-during-session changes (acceptance #1)", () => {
     const res = await runReport(dir, SID);
     expect(res.status).toBe("reported");
     expect(res.markdown).toContain("a.txt");
-    expect(res.markdown).toContain("Deleted");
+    expect(res.markdown).toContain("`a.txt` — deleted");
   });
 });
 
@@ -167,7 +167,7 @@ describe("large commits stay within the hook budget", () => {
     const elapsed = Date.now() - t0;
 
     expect(res.status).toBe("reported");
-    expect(res.oneLine).toContain("300 files changed");
+    expect(res.oneLine).toContain("Session: 300 changed");
     // Pre-fix this took >5s (one git spawn per path) and the hook watchdog
     // killed it silently. Batched, it comfortably fits the budget.
     expect(elapsed).toBeLessThan(4000);

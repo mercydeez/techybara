@@ -105,11 +105,14 @@ describe("flagship: gitignored .env change is caught and never leaked", () => {
     expect(delta.protectedPaths).toContain(".env");
     expect(delta.changes.find((c) => c.path === ".env")!.protected).toBe(true);
 
-    const oneLine = renderOneLine(delta)!;
-    const md = renderMarkdown(delta, {
+    const oneLine = renderOneLine(delta, delta)!;
+    const md = renderMarkdown(delta, delta, {
       sessionId: "s1",
       generatedAt: "t",
       baselineAt: "t",
+      turnNumber: 1,
+      turnReceipts: [],
+      sessionReceipts: [],
     });
 
     // The secret values must never appear anywhere in output.
@@ -132,7 +135,7 @@ describe("flagship: gitignored .env change is caught and never leaked", () => {
     const delta = computeDelta(base, current, { isProtected: compileProtected(cfg.protectedPaths) });
 
     expect(delta.changes).toHaveLength(0);
-    expect(renderOneLine(delta)).toBeNull();
+    expect(renderOneLine(delta, delta)).toBeNull();
   });
 
   it("classifies a gitignored .env ADDED during the session as added", async () => {

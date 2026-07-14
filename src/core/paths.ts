@@ -34,6 +34,16 @@ export function reportStatePath(top: string, sessionId: string): string {
   return join(sessionDir(top, sessionId), "last-reported.json");
 }
 
+/** Snapshot of the working tree at the end of the last fully-processed turn. */
+export function checkpointPath(top: string, sessionId: string): string {
+  return join(sessionDir(top, sessionId), "checkpoint.json");
+}
+
+/** One file per verification receipt — see report/receipt.ts for why. */
+export function receiptsDir(top: string, sessionId: string): string {
+  return join(sessionDir(top, sessionId), "receipts");
+}
+
 export function errorLogPath(top: string): string {
   return join(stateDir(top), "error.log");
 }
