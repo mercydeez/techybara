@@ -7,6 +7,7 @@
 *Quietly checks what actually changed.*
 
 [![npm version](https://img.shields.io/npm/v/techybara.svg)](https://www.npmjs.com/package/techybara)
+[![npm downloads](https://img.shields.io/npm/dm/techybara.svg)](https://www.npmjs.com/package/techybara)
 [![CI](https://img.shields.io/github/actions/workflow/status/mercydeez/techybara/ci.yml?branch=main&label=CI)](https://github.com/mercydeez/techybara/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/mercydeez/techybara.svg)](https://github.com/mercydeez/techybara/releases)
 [![node: >=18.3](https://img.shields.io/badge/node-%3E%3D18.3-brightgreen.svg)](https://nodejs.org)
