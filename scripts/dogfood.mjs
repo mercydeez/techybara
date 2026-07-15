@@ -164,8 +164,8 @@ try {
   tb(["receipt", "--ok"], bash("npm test"));
   const stop1 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
   check("turn 1 reports a banner", stop1.includes("systemMessage"), stop1);
-  check("turn 1 shows turn scope", stop1.includes("Turn: 3 changed"), stop1);
-  check("turn 1 shows session scope", stop1.includes("Session: 3 changed"), stop1);
+  check("turn 1 names its unit (files, not edits)", stop1.includes("Turn: 3 files changed (1 added, 2 modified)"), stop1);
+  check("turn 1 shows session scope", stop1.includes("Session: 3 files touched"), stop1);
   check("turn 1 shows the passing test", stop1.includes("✓ test"), stop1);
   check("turn 1 surfaces the protected .env", stop1.includes("protected: .env"), stop1);
   check("banner never leaks the secret", !stop1.includes("exfiltrated_new_value"), stop1);
@@ -175,8 +175,8 @@ try {
   writeFileSync(join(repo, "second.js"), "// turn two\n");
   tb(["receipt", "--fail"], { ...bash("npm test"), hook_event_name: "PostToolUseFailure" });
   const stop2 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
-  check("turn 2 counts only this turn's change", stop2.includes("Turn: 1 changed"), stop2);
-  check("turn 2 keeps the running session total", stop2.includes("Session: 4 changed"), stop2);
+  check("turn 2 counts only this turn's change", stop2.includes("Turn: 1 file added"), stop2);
+  check("turn 2 keeps the running session total", stop2.includes("Session: 4 files touched"), stop2);
   check("turn 2 shows the failing test", stop2.includes("✗ test"), stop2);
 
   // --- 6. A failed verification must never be suppressed ---------------------
@@ -206,6 +206,28 @@ try {
   const stop5 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
   check("an interrupted command is not reported as a failed test", !stop5.includes("✗ test"), stop5);
   check("an interrupted command is reported as unverified", stop5.includes("? test"), stop5);
+
+  // --- 7c. Redirection preserves the result; a pipe does not -----------------
+  // The regression this milestone fixed: `npm run typecheck 2>&1` reported "?"
+  // even though redirection provably keeps the exit status ((exit 1) 2>&1 -> 1).
+  console.log("\ndogfood: turn 6 — redirection vs pipeline");
+  writeFileSync(join(repo, "fifth.js"), "// turn six\n");
+  tb(["receipt", "--ok"], bash("npm run typecheck 2>&1"));
+  const stop6 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
+  check("a redirected command IS trusted (2>&1)", stop6.includes("✓ typecheck"), stop6);
+  check("a redirected command is not downgraded to ?", !stop6.includes("? typecheck"), stop6);
+
+  console.log("\ndogfood: turn 7 — redirect feeding a pipeline");
+  writeFileSync(join(repo, "sixth.js"), "// turn seven\n");
+  tb(["receipt", "--ok"], bash("npm run build 2>&1 | tee build.log"));
+  const stop7 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
+  check("a piped command is still NOT trusted", !stop7.includes("✓ build"), stop7);
+  check("a piped command is reported unverified", stop7.includes("? build"), stop7);
+
+  // The reason belongs in the detailed report, never in the compact stop line.
+  const report6 = readFileSync(join(repo, ".techybara", "sessions", SID, "report.md"), "utf8");
+  check("the report explains WHY a ? is a ?", report6.includes("piped"), report6.slice(0, 200));
+  check("the stop line stays compact (no reason inline)", !stop7.includes("piped-exit-status"), stop7);
 
   // --- 8. Non-verification commands leave nothing behind ---------------------
   const receiptsDir = join(repo, ".techybara", "sessions", SID, "receipts");
