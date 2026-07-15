@@ -3,8 +3,15 @@ import { computeDelta, deltaFingerprint } from "../src/core/diff.js";
 import { renderOneLine, renderMarkdown } from "../src/report/render.js";
 import type { Snapshot, SnapshotEntry } from "../src/core/types.js";
 
-function e(hash: string | null, xy: string): SnapshotEntry {
-  return { hash, xy };
+function e(hash: string | null, xy: string, mode?: string): SnapshotEntry {
+  return { hash, xy, ...(mode ? { mode } : {}) };
+}
+
+function sub(
+  xy: string,
+  state: { sub: string; commit: string | null; dirtySig: string | null },
+): SnapshotEntry {
+  return { hash: null, xy, submodule: state };
 }
 
 function snap(
@@ -89,6 +96,71 @@ describe("computeDelta", () => {
       snap({ "z.txt": e("1", "??"), "a.txt": e("2", "??"), "m.txt": e("3", "??") }),
     );
     expect(d.changes.map((c) => c.path)).toEqual(["a.txt", "m.txt", "z.txt"]);
+  });
+
+  describe("executable-bit fidelity", () => {
+    it("detects a mode-only change (identical content hash, flipped exec bit)", () => {
+      const d = computeDelta(
+        snap({ "run.sh": e("h1", ".M", "100644") }),
+        snap({ "run.sh": e("h1", ".M", "100755") }),
+      );
+      expect(d.modified).toBe(1);
+      expect(d.changes[0]!.path).toBe("run.sh");
+    });
+
+    it("treats matching mode and hash as unchanged", () => {
+      const d = computeDelta(
+        snap({ "run.sh": e("h1", ".M", "100755") }),
+        snap({ "run.sh": e("h1", ".M", "100755") }),
+      );
+      expect(d.changes).toHaveLength(0);
+    });
+
+    it("does not fold in a mode absent from both sides", () => {
+      const d = computeDelta(snap({ "a.txt": e("h1", "??") }), snap({ "a.txt": e("h1", "??") }));
+      expect(d.changes).toHaveLength(0);
+    });
+  });
+
+  describe("gitlink (submodule) fidelity", () => {
+    const st = (over: Partial<{ sub: string; commit: string | null; dirtySig: string | null }> = {}) => ({
+      sub: "N...",
+      commit: "c1",
+      dirtySig: null,
+      ...over,
+    });
+
+    it("detects a committed submodule pointer move", () => {
+      const d = computeDelta(
+        snap({ vendor: sub("A.", st({ commit: "c1" })) }),
+        snap({ vendor: sub("A.", st({ commit: "c2" })) }),
+      );
+      expect(d.changes[0]!.path).toBe("vendor");
+    });
+
+    it("detects a submodule going from clean to dirty", () => {
+      const d = computeDelta(
+        snap({ vendor: sub("N.", st({ sub: "N..." })) }),
+        snap({ vendor: sub(" M", st({ sub: "S.M." })) }),
+      );
+      expect(d.changes).toHaveLength(1);
+    });
+
+    it("detects a second edit inside an already-dirty submodule via its dirtySig, even though sub-flags are unchanged", () => {
+      const d = computeDelta(
+        snap({ vendor: sub(" M", st({ sub: "S.M.", dirtySig: "sig1" })) }),
+        snap({ vendor: sub(" M", st({ sub: "S.M.", dirtySig: "sig2" })) }),
+      );
+      expect(d.changes).toHaveLength(1);
+    });
+
+    it("treats an unchanged submodule state as no change", () => {
+      const d = computeDelta(
+        snap({ vendor: sub(" M", st({ dirtySig: "sig1" })) }),
+        snap({ vendor: sub(" M", st({ dirtySig: "sig1" })) }),
+      );
+      expect(d.changes).toHaveLength(0);
+    });
   });
 });
 

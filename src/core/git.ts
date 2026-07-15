@@ -3,6 +3,8 @@
 // porcelain output is parsed from NUL-delimited bytes so paths with spaces,
 // newlines, or unicode survive intact.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const pexec = promisify(execFile);
@@ -54,6 +56,14 @@ export interface PorcelainEntry {
   xy: string;
   /** true when the working-tree copy is deleted (should not be hashed). */
   deleted: boolean;
+  /** Worktree file mode ("100644", "100755", "160000" for a gitlink, ...), when git reported one. */
+  mode?: string;
+  /**
+   * Submodule state field: "N..." for a non-submodule path, or
+   * "S<c><m><u>" for a gitlink (commit-changed/modified/untracked flags).
+   * Only records that begin with "S" are gitlinks.
+   */
+  sub?: string;
 }
 
 /**
@@ -77,14 +87,22 @@ export async function getPorcelain(top: string): Promise<PorcelainEntry[]> {
     const type = rec[0];
     if (type === "1") {
       // "1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>" -> 8 fields then path
-      const xy = rec.slice(2, 4);
-      const path = pathAfterFields(rec, 8);
-      if (path) entries.push({ path, xy, deleted: xy[1] === "D" || xy[0] === "D" });
+      const parsed = fieldsAndPath(rec, 8);
+      if (!parsed || !parsed.path) continue;
+      const [, xy, sub, , , mW] = parsed.fields;
+      entries.push({
+        path: parsed.path,
+        xy: xy!,
+        deleted: xy![1] === "D" || xy![0] === "D",
+        mode: mW,
+        sub,
+      });
     } else if (type === "u") {
       // unmerged: "u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>" -> 10 fields
-      const xy = rec.slice(2, 4);
-      const path = pathAfterFields(rec, 10);
-      if (path) entries.push({ path, xy, deleted: false });
+      const parsed = fieldsAndPath(rec, 10);
+      if (!parsed || !parsed.path) continue;
+      const [, xy, sub, , , , mW] = parsed.fields;
+      entries.push({ path: parsed.path, xy: xy!, deleted: false, mode: mW, sub });
     } else if (type === "?") {
       // untracked: "? <path>"
       const path = rec.slice(2);
@@ -95,15 +113,22 @@ export async function getPorcelain(top: string): Promise<PorcelainEntry[]> {
   return entries;
 }
 
-/** Return the substring after skipping `nFields` space-delimited leading fields. */
-function pathAfterFields(rec: string, nFields: number): string {
+/**
+ * Split a NUL-delimited porcelain record into its leading space-delimited
+ * fields plus the trailing path. `-z` disables path quoting, so a path
+ * containing spaces is safe: the fixed-format fields before it never contain
+ * spaces themselves, and everything after the last field boundary is path.
+ */
+function fieldsAndPath(rec: string, nFields: number): { fields: string[]; path: string } | null {
+  const fields: string[] = [];
   let idx = 0;
   for (let f = 0; f < nFields; f++) {
     const sp = rec.indexOf(" ", idx);
-    if (sp === -1) return "";
+    if (sp === -1) return null;
+    fields.push(rec.slice(idx, sp));
     idx = sp + 1;
   }
-  return rec.slice(idx);
+  return { fields, path: rec.slice(idx) };
 }
 
 export interface NameStatus {
@@ -131,13 +156,32 @@ export async function diffNameStatus(top: string, from: string, to: string): Pro
 /** The well-known hash of git's empty tree — a valid diff base for repos whose baseline had no commits. */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+export interface TreeObject {
+  hash: string;
+  mode: string;
+  /** "commit" is a gitlink (submodule pointer), not file content. */
+  type: "blob" | "commit";
+}
+
 /**
- * Blob hashes for many paths at a ref in a handful of processes (batched
+ * Tree objects for many paths at a ref in a handful of processes (batched
  * `git ls-tree -z`), instead of one spawn per path — a 300-file commit must not
  * stall the Stop hook. Paths absent at the ref are simply absent from the map.
+ *
+ * Includes gitlink (submodule) entries as `type: "commit"`: the "hash" ls-tree
+ * reports for those IS the submodule's recorded commit sha, which is exactly
+ * the right signature for a *committed* pointer move — no working-tree
+ * inspection needed for that case (only a currently-dirty submodule needs the
+ * heavier resolveSubmoduleState). Symlinks and other non-blob, non-commit
+ * entries are recorded too so a symlink<->regular-file typechange is visible
+ * via its mode even when ls-tree's hash happens to coincide.
  */
-export async function treeHashesAt(top: string, ref: string, paths: string[]): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
+export async function treeHashesAt(
+  top: string,
+  ref: string,
+  paths: string[],
+): Promise<Map<string, TreeObject>> {
+  const result = new Map<string, TreeObject>();
   const CHUNK = 200;
   for (let i = 0; i < paths.length; i += CHUNK) {
     const chunk = paths.slice(i, i + CHUNK);
@@ -153,12 +197,67 @@ export async function treeHashesAt(top: string, ref: string, paths: string[]): P
       const tab = rec.indexOf("\t");
       if (tab === -1) continue;
       const meta = rec.slice(0, tab).split(" ");
+      const mode = meta[0];
+      const type = meta[1];
       const hash = meta[2];
       const path = rec.slice(tab + 1);
-      if (hash && meta[1] === "blob") result.set(path, hash);
+      if (hash && mode && (type === "blob" || type === "commit")) {
+        result.set(path, { hash, mode, type });
+      }
     }
   }
   return result;
+}
+
+/**
+ * Resolve a gitlink's current working-tree state: its own HEAD commit and a
+ * coarse signature of its own dirty status. Both are best-effort (null when
+ * the submodule is uninitialized, detached from disk, or otherwise
+ * unreadable) — a resolution failure degrades the capture rather than
+ * crashing it, same as any other partial-evidence path in this codebase.
+ */
+export async function resolveSubmoduleState(
+  top: string,
+  relPath: string,
+): Promise<{ commit: string | null; dirtySig: string | null }> {
+  const abs = join(top, relPath);
+  const [commit, dirtySig] = await Promise.all([submoduleHead(abs), submoduleDirtySignature(abs)]);
+  return { commit, dirtySig };
+}
+
+async function submoduleHead(abs: string): Promise<string | null> {
+  try {
+    const out = await git(abs, ["rev-parse", "HEAD"]);
+    const sha = out.toString("utf8").trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null; // uninitialized submodule, detached .git, etc.
+  }
+}
+
+/**
+ * A hash of the submodule's own uncommitted changes — the diff of tracked
+ * content against HEAD, plus the list of untracked paths. Deliberately NOT a
+ * hash of `git status` output: status only reports mode/dirty *flags*, which
+ * are identical whether a tracked file changed from "a" to "b" or from "a" to
+ * "c" — so a status-based signature cannot tell two edits inside an
+ * already-dirty submodule apart, which is exactly the gap this exists to
+ * close. Diff content changes with the content. Still coarse (a full
+ * recursive blob hash of every submodule file is not attempted), but real.
+ */
+async function submoduleDirtySignature(abs: string): Promise<string | null> {
+  try {
+    const [diff, untracked] = await Promise.all([
+      git(abs, ["diff", "HEAD"]),
+      git(abs, ["ls-files", "--others", "--exclude-standard", "-z"]),
+    ]);
+    const hash = createHash("sha1");
+    hash.update(diff);
+    hash.update(untracked);
+    return hash.digest("hex");
+  } catch {
+    return null; // unborn HEAD, uninitialized submodule, etc.
+  }
 }
 
 /**

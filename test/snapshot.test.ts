@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, unlinkSync, utimesSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureSnapshot, writeBaseline } from "../src/core/snapshot.js";
+import { captureSnapshot, writeBaseline, readSnapshot } from "../src/core/snapshot.js";
 import { getToplevel } from "../src/core/git.js";
 import { defaultConfig } from "../src/config.js";
 
@@ -176,5 +176,23 @@ describe("writeBaseline", () => {
     } finally {
       rmSync(nonRepo, { recursive: true, force: true });
     }
+  });
+});
+
+describe("snapshot schema version", () => {
+  it("rejects a v1 baseline (pre-mode/submodule fields) rather than misreading it", async () => {
+    writeFileSync(join(dir, "a.txt"), "x\n");
+    commitAll("init");
+    const first = await writeBaseline(dir, "sess-v1", defaultConfig());
+    expect(first.status).toBe("written");
+
+    const bpath = join(dir, ".techybara", "sessions", "sess-v1", "baseline.json");
+    const v1 = JSON.parse(readFileSync(bpath, "utf8"));
+    v1.version = 1;
+    writeFileSync(bpath, JSON.stringify(v1));
+
+    // Same safe-migration pattern as CHECKPOINT_VERSION: treated as absent,
+    // never parsed as if its (mode-less, submodule-less) entries were current.
+    expect(readSnapshot(bpath)).toBeNull();
   });
 });

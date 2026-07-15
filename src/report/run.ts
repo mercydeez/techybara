@@ -378,9 +378,12 @@ async function mergeCommittedChanges(
 
   for (const { status, path } of changed) {
     // Baseline side: content at session start (absent for a committed add).
+    // ls-tree's "hash" for a gitlink IS the submodule's recorded commit sha,
+    // which is exactly the right signature for a committed pointer move — no
+    // extra resolution needed for a purely-committed change.
     if (!(path in baseline.entries)) {
       const b = baseHashes.get(path);
-      if (b) baseline.entries[path] = { xy: "@@", hash: b };
+      if (b) baseline.entries[path] = { xy: "@@", hash: b.hash, mode: b.mode };
     }
     // Current side: skip if the working tree already recorded it (still dirty).
     if (path in current.entries) continue;
@@ -388,7 +391,7 @@ async function mergeCommittedChanges(
       current.entries[path] = { xy: " D", hash: null };
     } else {
       const c = curHashes.get(path);
-      if (c) current.entries[path] = { xy: status === "A" ? "A@" : "M@", hash: c };
+      if (c) current.entries[path] = { xy: status === "A" ? "A@" : "M@", hash: c.hash, mode: c.mode };
     }
   }
 }

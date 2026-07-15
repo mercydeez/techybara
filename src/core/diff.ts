@@ -47,7 +47,19 @@ export interface DeltaOptions {
 
 function signature(entry: SnapshotEntry | undefined): string {
   if (!entry) return "clean";
-  if (entry.hash !== null) return entry.hash;
+  if (entry.submodule) {
+    // A gitlink's content is its commit pointer plus its own working-tree
+    // dirtiness, not a blob — comparing all three catches a commit move, a
+    // fresh dirty/clean transition, AND a further edit inside an
+    // already-dirty submodule (sub flags alone would miss that last case).
+    const s = entry.submodule;
+    return `submodule:${entry.xy}:${s.sub}:${s.commit ?? ""}:${s.dirtySig ?? ""}`;
+  }
+  if (entry.hash !== null) {
+    // Mode is folded in so a chmod-only change (identical bytes, flipped
+    // executable bit) doesn't collapse to "no change" behind an unchanged hash.
+    return entry.mode ? `${entry.mode}:${entry.hash}` : entry.hash;
+  }
   if (entry.xy.includes("D")) return "deleted";
   return "present:" + entry.xy;
 }

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } fr
 import { join } from "node:path";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
 import { acquireLock, writeFileAtomic } from "./fsutil.js";
-import { getHead, getPorcelain, getToplevel, hashObjects } from "./git.js";
+import { getHead, getPorcelain, getToplevel, hashObjects, resolveSubmoduleState } from "./git.js";
 import { compileGlobs } from "./glob.js";
 import { findProtectedFiles } from "./protected.js";
 import { baselinePath, sessionDir, sessionLockPath, sessionsDir } from "./paths.js";
@@ -53,21 +53,31 @@ export async function captureSnapshot(
     degraded = true;
     note = `${visible.length} changed files exceeds maxFiles (${config.maxFiles}); status-only.`;
     for (const e of visible) {
-      entries[e.path] = { xy: e.xy, hash: null };
+      entries[e.path] = { xy: e.xy, hash: null, ...(e.mode ? { mode: e.mode } : {}) };
     }
   } else {
     const toHash: string[] = [];
+    const submodulePaths: string[] = [];
     const metadataByPath = new Map<string, FileMetadata>();
     let metadataCompared = 0;
     for (const e of visible) {
-      entries[e.path] = { xy: e.xy, hash: null };
+      entries[e.path] = { xy: e.xy, hash: null, ...(e.mode ? { mode: e.mode } : {}) };
       if (e.deleted) continue;
+      // A gitlink's content is a commit pointer, not a blob: hash-object would
+      // be meaningless (or error) against a directory. Resolve it separately.
+      if (e.sub?.startsWith("S")) {
+        submodulePaths.push(e.path);
+        continue;
+      }
       const metadata = fileMetadata(join(top, e.path));
       if (!metadata) {
         if (!isProtected(e.path)) metadataCompared++;
         continue;
       }
       metadataByPath.set(e.path, metadata);
+      // Untracked files carry no porcelain mode; backfill from the filesystem
+      // so this entry compares consistently once the same path is committed.
+      if (!e.mode) entries[e.path]!.mode = metadata.execMode;
       const hashCap = isProtected(e.path) ? PROTECTED_HASH_CAP_BYTES : maxBytes;
       if (metadata.size <= hashCap) {
         toHash.push(e.path);
@@ -87,6 +97,28 @@ export async function captureSnapshot(
         const metadata = metadataByPath.get(path);
         if (metadata) existing.hash = metadataSignature(metadata);
         metadataCompared++;
+      }
+    }
+    if (submodulePaths.length > 0) {
+      const byPath = new Map(visible.map((e) => [e.path, e]));
+      const states = await Promise.all(
+        submodulePaths.map((p) => resolveSubmoduleState(top, p)),
+      );
+      let submoduleUnresolved = 0;
+      submodulePaths.forEach((p, i) => {
+        const state = states[i]!;
+        const sub = byPath.get(p)!.sub!;
+        const existing = entries[p]!;
+        existing.submodule = { sub, commit: state.commit, dirtySig: state.dirtySig };
+        // Both null means resolution failed outright (e.g. uninitialized) —
+        // the sub-state flags are still recorded, but a further edit inside
+        // that unresolved submodule cannot be detected. Say so, don't hide it.
+        if (state.commit === null && state.dirtySig === null) submoduleUnresolved++;
+      });
+      if (submoduleUnresolved > 0) {
+        degraded = true;
+        const msg = `${submoduleUnresolved} submodule(s) could not be inspected; only their outer status flags are tracked.`;
+        note = note ? `${note} ${msg}` : msg;
       }
     }
     if (metadataCompared > 0) {
@@ -124,12 +156,25 @@ function isStatePath(path: string): boolean {
 interface FileMetadata {
   size: number;
   mtimeMs: number;
+  /**
+   * Git-shaped mode ("100644"/"100755") derived from the filesystem's
+   * executable bit. Only used to fill in `mode` for paths git itself gave no
+   * mode for — untracked files and gitignored protected files. Without this,
+   * such a path's mode-less snapshot entry compares unequal to the SAME
+   * unchanged file once committed (ls-tree always reports a mode), producing
+   * a false "modified" the instant a fresh untracked file gets committed.
+   */
+  execMode: string;
 }
 
 function fileMetadata(abs: string): FileMetadata | null {
   try {
     const stat = statSync(abs);
-    return { size: stat.size, mtimeMs: stat.mtimeMs };
+    return {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      execMode: (stat.mode & 0o111) !== 0 ? "100755" : "100644",
+    };
   } catch {
     return null;
   }
@@ -170,7 +215,7 @@ async function mergeProtectedFiles(
     } else {
       const sig = metadataSignature(metadata);
       if (existing) existing.hash = sig;
-      else entries[p] = { xy: "!!", hash: sig };
+      else entries[p] = { xy: "!!", hash: sig, mode: metadata.execMode };
       metadataCompared++;
     }
   }
@@ -183,13 +228,14 @@ async function mergeProtectedFiles(
         const metadata = metadataByPath.get(p);
         const existing = entries[p];
         if (metadata && existing) existing.hash = metadataSignature(metadata);
-        else if (metadata) entries[p] = { xy: "!!", hash: metadataSignature(metadata) };
+        else if (metadata) entries[p] = { xy: "!!", hash: metadataSignature(metadata), mode: metadata.execMode };
         metadataCompared++;
         continue;
       }
       const existing = entries[p];
       if (existing) existing.hash = sha;
-      else entries[p] = { xy: "!!", hash: sha }; // "!!" = protected, tracking state unknown
+      // "!!" = protected, tracking state unknown
+      else entries[p] = { xy: "!!", hash: sha, mode: metadataByPath.get(p)?.execMode };
     }
   }
   const note =

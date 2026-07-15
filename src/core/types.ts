@@ -1,7 +1,13 @@
 // Shared data shapes for snapshots and diffs. Kept dependency-free and
 // serializable so baselines are plain JSON on disk.
 
-export const SNAPSHOT_VERSION = 1;
+// v2: SnapshotEntry gained `mode` (git file mode, so a chmod-only change is no
+// longer invisible behind an unchanged content hash) and `submodule` (gitlink
+// entries carry a commit pointer + working-tree dirty signature instead of a
+// blob hash). A v1 baseline fails the version check in readSnapshot and is
+// treated exactly like a missing one: re-established, one turn under-reported
+// rather than misread. Same safe-migration pattern as CHECKPOINT_VERSION.
+export const SNAPSHOT_VERSION = 2;
 
 // v2: added claimedReceipts (receipt→turn attribution moved from timestamps to
 // explicit claims). A v1 checkpoint is treated as missing, which degrades to
@@ -20,6 +26,36 @@ export interface SnapshotEntry {
   xy: string;
   /** Content hash, coarse metadata signature, or null if deleted/unhashable. */
   hash: string | null;
+  /**
+   * Git file mode (e.g. "100644", "100755", "120000", "160000" for a gitlink),
+   * when git reported one. A mode-only change (chmod +x with identical bytes)
+   * leaves `hash` unchanged, so this must be compared alongside it — otherwise
+   * an executable-bit flip collapses to "no change".
+   */
+  mode?: string;
+  /** Present only for gitlink (submodule) entries — see SubmoduleEntryState. */
+  submodule?: SubmoduleEntryState;
+}
+
+/**
+ * A gitlink's content is a commit pointer plus whatever is dirty in the
+ * submodule's own working tree, not a blob — `hash` is always null for these
+ * entries. `commit`/`dirtySig` are best-effort (null when the submodule is
+ * uninitialized or otherwise unreadable); a resolution failure never fails the
+ * whole capture, it just cannot detect further within-dirty changes.
+ */
+export interface SubmoduleEntryState {
+  /** Raw porcelain sub-state, e.g. "S.M." (commit-changed/modified/untracked flags). */
+  sub: string;
+  /** The submodule's own HEAD commit. */
+  commit: string | null;
+  /**
+   * Coarse hash of the submodule's own `git status` output. Changes whenever
+   * the submodule's working tree changes further, even while it stays dirty
+   * in the same way (same sub-flags) — otherwise a second edit inside an
+   * already-dirty submodule would go undetected.
+   */
+  dirtySig: string | null;
 }
 
 export interface Snapshot {
