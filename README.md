@@ -43,12 +43,27 @@ change. TechyBara watches those paths directly.
 After a turn that changed files, you'll see a single line:
 
 ```text
-🦫 Turn: 3 changed (+1, ~2) · Session: 7 changed · ✓ test · ⚠️ protected: .env
+🦫 Turn: 3 files changed (1 added, 2 modified) · Session: 7 files touched · ✓ test · ⚠️ protected: .env
 ```
 
-Read it as: *this turn* touched 3 files (1 new, 2 modified); *this session* has
-touched 7 so far; a test command ran and the harness reported it passing; and a
-protected path changed.
+Every count is **distinct files** — never edits, hunks, or lines:
+
+- **Turn** — files whose content differs from the end of the previous turn. This
+  is "what just happened".
+- **Session** — distinct files whose content differs from the session baseline. A
+  file edited in five turns counts **once**. Edit it and change it back, and it
+  leaves this count entirely — comparison is by content, not by activity.
+
+Then what was actually verified, and what needs attention:
+
+| Mark | Means |
+| --- | --- |
+| `✓ test` | The harness reported the command as succeeding, and its shape can't hide a failure. |
+| `✗ test` | The harness reported it as failing. |
+| `? test` | It ran, but **no trustworthy result** — e.g. a pipe took the exit status. **Not a failure.** |
+
+`techybara report` says *why* any `?` is a `?`. TechyBara never reads the agent's
+prose to decide these — only which lifecycle event the harness fired.
 
 A turn that TechyBara fully verified and found unchanged produces **no output**.
 Silence means "checked, nothing differs" — not "didn't look." If verification is
@@ -194,8 +209,13 @@ Being clear about the edges is part of the tool.
 - **It can't judge an exit status it can't trust.** `npm test || true` exits 0
   even when tests fail, so TechyBara records `unknown` rather than a pass.
   Anything that can decouple a command's exit status from its real result — a
-  pipe, a `;`, backgrounding, `$(…)`, `if` — gets the same treatment. `&&` is
-  exempt, because it short-circuits and still propagates a failure.
+  pipe, a `;`, backgrounding, `$(…)`, `if` — gets the same treatment. `&&` and
+  redirection (`>`, `2>&1`) are exempt, because they provably preserve the exit
+  status. [docs/shells.md](docs/shells.md) lists every rule and its evidence.
+- **It only understands POSIX shell syntax**, which is safe because it only ever
+  reads Claude Code's `Bash` tool. It does not analyse `cmd.exe` or PowerShell as
+  source shells; a payload it can't confirm came from Bash yields `unknown`, not
+  a guess.
 - **It doesn't show line-level diffs.** It reports *which* files changed and which
   are protected. Use `git diff` for line detail.
 - **It is not a defense against an adversarial agent.** TechyBara is observe-only; an
@@ -260,7 +280,7 @@ Everything TechyBara persists, and nothing else:
 | `error.log` | Timestamped internal errors, so a failure is never silent. |
 | `sessions/<id>/baseline.json` | Per-path git status codes and **blob hashes** as of session start. Hashes, never bytes. |
 | `sessions/<id>/checkpoint.json` | The same shape, as of the end of the last turn, plus a turn counter. |
-| `sessions/<id>/receipts/*.json` | One per observed verification: `{version, category, outcome, at, durationMs?}`. No command, no output. |
+| `sessions/<id>/receipts/*.json` | One per observed verification: `{version, category, outcome, at, durationMs?, reason?}`. `reason` is a closed enum (e.g. `piped-exit-status`). No command, no output. |
 | `sessions/<id>/report.md` | The rendered human report — paths and change kinds. |
 | `sessions/<id>/last-reported.json` | A single hash used to suppress repeat banners. |
 

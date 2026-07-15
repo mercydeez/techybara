@@ -31,6 +31,21 @@ export type VerificationCategory =
 
 export type VerificationOutcome = "success" | "fail" | "unknown";
 
+/**
+ * Why an outcome is `unknown`. "? typecheck" alone cannot distinguish "ran, but
+ * a pipe ate the exit status" from "was interrupted" — and the two call for
+ * different responses. This is a CLOSED ENUM on purpose: it is written to disk,
+ * so it must be structurally incapable of carrying a fragment of the command.
+ *
+ * There is no "not observed" member: when nothing was observed there is no
+ * receipt to put a reason on.
+ */
+export type UnknownReason =
+  | "piped-exit-status" // a pipeline reports its LAST stage's status
+  | "masked-exit-status" // `||`, `;`, `&`, `$(…)`, if/while
+  | "interrupted" // the call never finished, so nothing was learned
+  | "unconfirmed-shell"; // could not confirm the payload came from the Bash tool
+
 export interface Receipt {
   version: number;
   category: VerificationCategory;
@@ -46,6 +61,8 @@ export interface Receipt {
    * estimate it, because a made-up number is worse than no number.
    */
   durationMs?: number;
+  /** Present only when `outcome` is "unknown": which kind of unknown it is. */
+  reason?: UnknownReason;
 }
 
 /**
@@ -59,6 +76,18 @@ export interface Observation {
   interrupted?: boolean;
   /** Claude Code's own `duration_ms`, when present. */
   durationMs?: number;
+  /**
+   * False when we could not confirm the command came from Claude Code's Bash
+   * tool. Our shell analysis is POSIX-specific, so an unconfirmed shell means
+   * the analysis does not apply and no confident verdict is available.
+   */
+  shellConfirmed?: boolean;
+}
+
+/** An outcome plus, when it is "unknown", which kind of unknown. */
+export interface Verdict {
+  outcome: VerificationOutcome;
+  reason?: UnknownReason;
 }
 
 // Ordered: first match wins, so `npm run typecheck` is typecheck rather than
@@ -74,26 +103,56 @@ const CATEGORY_RULES: readonly (readonly [VerificationCategory, RegExp])[] = [
 ];
 
 /**
- * Shell constructs that decouple the tool call's exit status from the
- * verification command's real result.
+ * Constructs that are NOT masking, stripped before the masking scan.
  *
- * `npm test || true` exits 0 while tests fail, so PostToolUse fires and a naive
- * reading records a false success. Blacklisting operators one at a time loses —
- * `;`, `|`, `&`, `$(...)`, and `if` all mask too. So this inverts the test:
- * `&&` is explicitly allowed because it short-circuits (a failing left side
- * propagates its non-zero status) and it is the common honest form
- * (`cd app && npm test`); ANY other shell metacharacter degrades the outcome to
- * "unknown".
+ * Redirection does not touch a command's exit status — verified, not assumed:
+ * `(exit 1) 2>&1` and `(exit 1) >/dev/null 2>&1` both still report 1. Treating
+ * `>` (and the `&` inside `2>&1`, which is fd duplication, not backgrounding)
+ * as masking made the extremely common `npm run typecheck 2>&1` report `?`
+ * instead of `✓` — under-claiming a real, trustworthy pass.
  *
- * Conservative in the only direction that matters: it can under-claim, never
- * over-claim.
+ * `&&` short-circuits, so a failing left side still propagates its status, and
+ * `cd app && npm test` is the common honest form.
+ *
+ * Order matters: `2>&1` must be consumed before the bare `>` rule, or the
+ * leftover `&1` would look like backgrounding.
  */
-const MASKING = /[|;&`>]|\$\(|\bif\b|\bwhile\b|\bset\s+\+e\b/;
+const NON_MASKING = [
+  /&&/g, // short-circuit: failure propagates
+  /\d*>&\d*/g, // fd duplication: 2>&1, >&2
+  /&>>?/g, // bash shorthand: &> &>>
+  />>?/g, // output redirection: > >>
+  /<</g, // heredoc
+  /</g, // input redirection
+];
+
+/**
+ * Constructs that genuinely decouple the tool call's exit status from the
+ * verification command's real result. `npm test || true` exits 0 while tests
+ * fail, so a naive reading records a false success.
+ *
+ * SHELL SEMANTICS. These are POSIX/Bash rules, and they are only safe to apply
+ * because the receipt hooks are registered with `matcher: "Bash"` and cli.ts
+ * re-checks `tool_name` — so the command always came from Claude Code's Bash
+ * tool. Anything we cannot confirm came from that tool is reported
+ * "unconfirmed-shell" rather than judged by these rules. See docs/shells.md.
+ */
+function maskReason(cmd: string): UnknownReason | null {
+  // Scan with the provably-safe constructs removed, then treat ANY remaining
+  // shell metacharacter as masking. Blacklisting them one at a time loses.
+  const neutral = NON_MASKING.reduce<string>((s, re) => s.replace(re, " "), cmd);
+  // `||` must be tested before the bare pipe, or its first `|` reads as a
+  // pipeline. It is not a pipeline — it swallows the failure outright.
+  if (/\|\|/.test(neutral)) return "masked-exit-status";
+  if (/\|/.test(neutral)) return "piped-exit-status";
+  if (/[;&`]|\$\(|\bif\b|\bwhile\b|\bset\s+\+e\b/.test(neutral)) return "masked-exit-status";
+  return null;
+}
 
 export interface Classification {
   category: VerificationCategory;
-  /** True when the command's exit status may not reflect the real result. */
-  masked: boolean;
+  /** Null when the exit status is trustworthy; otherwise why it is not. */
+  maskedBy: UnknownReason | null;
 }
 
 /**
@@ -108,30 +167,32 @@ export function classifyCommand(command: string): Classification | null {
   const category = CATEGORY_RULES.find(([, re]) => re.test(cmd))?.[0];
   if (!category) return null;
 
-  // Strip `&&` before scanning: it is the one compound operator that preserves
-  // a failing exit status, so it must not trip the masking check.
-  const masked = MASKING.test(cmd.replace(/&&/g, " "));
-  return { category, masked };
+  return { category, maskedBy: maskReason(cmd) };
 }
 
 /**
  * Decide an outcome from what the harness reported. Pure, so the rules are
  * testable in isolation — this is the function that must never lie.
  */
-export function decideOutcome(
-  classification: Classification,
-  observed: Observation,
-): VerificationOutcome {
+export function decideOutcome(classification: Classification, observed: Observation): Verdict {
   // An interrupted command did not fail — it never finished. Claude Code reports
   // an interrupt through PostToolUseFailure (with is_interrupt), but calling it
   // a failed test would be as wrong as calling it a pass: nobody learned
   // anything about the code. This is the only case where we downgrade a
   // "failure" rather than trust it.
-  if (observed.interrupted) return "unknown";
+  if (observed.interrupted) return { outcome: "unknown", reason: "interrupted" };
   // A masked command that FAILED still failed — masking only ever makes an exit
-  // status look better than reality, so a failure is trustworthy as-is.
-  if (!observed.succeeded) return "fail";
-  return classification.masked ? "unknown" : "success";
+  // status look better than reality, so a failure is trustworthy as-is. This
+  // holds regardless of shell, so it is decided before the shell check.
+  if (!observed.succeeded) return { outcome: "fail" };
+  // Every rule below reads POSIX shell syntax. If we cannot confirm the command
+  // came from the Bash tool, those rules may not apply — so we cannot claim a
+  // pass, even though the tool call succeeded.
+  if (observed.shellConfirmed === false) {
+    return { outcome: "unknown", reason: "unconfirmed-shell" };
+  }
+  if (classification.maskedBy) return { outcome: "unknown", reason: classification.maskedBy };
+  return { outcome: "success" };
 }
 
 /**
@@ -145,16 +206,18 @@ export function writeReceipt(
   observed: Observation,
   at: Date = new Date(),
 ): void {
+  const verdict = decideOutcome(classification, observed);
   const receipt: Receipt = {
     version: RECEIPT_VERSION,
     category: classification.category,
-    outcome: decideOutcome(classification, observed),
+    outcome: verdict.outcome,
     at: at.toISOString(),
     ...(typeof observed.durationMs === "number" &&
     Number.isFinite(observed.durationMs) &&
     observed.durationMs >= 0
       ? { durationMs: observed.durationMs }
       : {}),
+    ...(verdict.reason ? { reason: verdict.reason } : {}),
   };
 
   const dir = receiptsDir(top, sessionId);
@@ -168,12 +231,22 @@ export function writeReceipt(
   writeFileAtomic(join(dir, `${randomUUID()}.json`), JSON.stringify(receipt) + "\n");
 }
 
+const UNKNOWN_REASONS: readonly string[] = [
+  "piped-exit-status",
+  "masked-exit-status",
+  "interrupted",
+  "unconfirmed-shell",
+];
+
 function parseReceipt(raw: string): Receipt | null {
   try {
     const p = JSON.parse(raw) as Partial<Receipt>;
     if (p.version !== RECEIPT_VERSION) return null;
     if (typeof p.category !== "string" || typeof p.at !== "string") return null;
     if (p.outcome !== "success" && p.outcome !== "fail" && p.outcome !== "unknown") return null;
+    // Drop an unrecognized reason rather than surfacing it: the field is meant
+    // to be a closed enum, and a receipt carrying free text would defeat that.
+    if (p.reason !== undefined && !UNKNOWN_REASONS.includes(p.reason)) delete p.reason;
     return p as Receipt;
   } catch {
     return null;
@@ -224,6 +297,8 @@ export interface CategorySummary {
   outcome: VerificationOutcome;
   /** Duration of the run that decided this outcome, when the harness gave one. */
   durationMs?: number;
+  /** Why the deciding run's outcome is "unknown". Absent otherwise. */
+  reason?: UnknownReason;
 }
 
 export function summarize(receipts: readonly Receipt[]): CategorySummary[] {
@@ -239,6 +314,7 @@ export function summarize(receipts: readonly Receipt[]): CategorySummary[] {
       // The duration of the run we are actually reporting on — not a sum across
       // runs, which would describe no single event.
       ...(r.durationMs !== undefined ? { durationMs: r.durationMs } : {}),
+      ...(r.reason !== undefined ? { reason: r.reason } : {}),
     }))
     .sort((a, b) => (a.category < b.category ? -1 : 1));
 }

@@ -113,8 +113,9 @@ describe("renderOneLine", () => {
       isProtected: (p) => p === ".env",
     });
     const line = renderOneLine(d, d)!;
-    expect(line).toContain("Turn: 2 changed");
-    expect(line).toContain("Session: 2 changed");
+    // Counts name their unit: files, not edits/hunks/lines.
+    expect(line).toContain("Turn: 2 files added");
+    expect(line).toContain("Session: 2 files touched");
     expect(line).toContain("protected: .env");
   });
 
@@ -122,8 +123,20 @@ describe("renderOneLine", () => {
     const turn = computeDelta(snap({}), snap({}));
     const session = computeDelta(snap({}), snap({ "a.txt": e("y", "??"), "b.txt": e("z", "??") }));
     const line = renderOneLine(turn, session)!;
-    expect(line).toContain("Turn: 0 changed");
-    expect(line).toContain("Session: 2 changed");
+    expect(line).toContain("Turn: no files changed");
+    expect(line).toContain("Session: 2 files touched");
+  });
+
+  it("names a single kind plainly and spells out a mix", () => {
+    const one = computeDelta(snap({}), snap({ "a.txt": e("y", ".M") }));
+    expect(renderOneLine(one, one)!).toContain("Turn: 1 file modified");
+
+    const mixed = computeDelta(
+      snap({}),
+      snap({ "new.txt": e("n", "??"), "edit.txt": e("e", ".M"), "gone.txt": e(null, " D") }),
+    );
+    const line = renderOneLine(mixed, mixed)!;
+    expect(line).toContain("Turn: 3 files changed (1 added, 1 modified, 1 deleted)");
   });
 
   it("appends observed verification, worst outcome per category", () => {

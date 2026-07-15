@@ -44,16 +44,26 @@ function toJsonDelta(d: SessionDelta): JsonDelta {
   };
 }
 
-function toJsonReceipts(receipts: readonly Receipt[]): {
-  category: string;
-  outcome: string;
-  durationMs?: number;
-}[] {
+/** Additive within schema v1: `reason` is optional and only ever set on "unknown". */
+function toJsonReceipts(receipts: readonly Receipt[]): JsonVerification[] {
   return summarize(receipts).map((s) => ({
     category: s.category,
     outcome: s.outcome,
     ...(s.durationMs !== undefined ? { durationMs: s.durationMs } : {}),
+    ...(s.reason !== undefined ? { reason: s.reason } : {}),
   }));
+}
+
+export interface JsonVerification {
+  category: string;
+  outcome: string;
+  durationMs?: number;
+  /**
+   * Only present when `outcome` is "unknown". A closed enum, so a consumer can
+   * branch on it: "piped-exit-status" | "masked-exit-status" | "interrupted" |
+   * "unconfirmed-shell".
+   */
+  reason?: string;
 }
 
 export interface JsonReport {
@@ -68,9 +78,9 @@ export interface JsonReport {
   session?: JsonDelta;
   verification?: {
     /** Worst outcome per category, for the latest turn. */
-    turn: { category: string; outcome: string; durationMs?: number }[];
+    turn: JsonVerification[];
     /** Worst outcome per category, across the whole session. */
-    session: { category: string; outcome: string; durationMs?: number }[];
+    session: JsonVerification[];
     /** False when no verification command was observed in the latest turn. */
     observedThisTurn: boolean;
   };

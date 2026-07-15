@@ -3,7 +3,7 @@
 // markdown report written to disk.
 import type { FileCategory } from "../core/category.js";
 import type { SessionDelta } from "../core/diff.js";
-import type { Receipt, VerificationOutcome } from "./receipt.js";
+import type { Receipt, UnknownReason, VerificationOutcome } from "./receipt.js";
 import { summarize } from "./receipt.js";
 
 const OUTCOME_MARK: Record<VerificationOutcome, string> = {
@@ -17,6 +17,30 @@ function receiptsFragment(receipts: readonly Receipt[]): string {
   return summarize(receipts)
     .map((s) => `${OUTCOME_MARK[s.outcome]} ${s.category}`)
     .join(" · ");
+}
+
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/**
+ * Spell out what changed, rather than leaving the reader to decode symbols.
+ * `~6` gave no clue whether it counted files, edits, hunks, or lines; every
+ * count here is **distinct files**, never edits or lines.
+ *
+ * One kind of change reads naturally ("1 file modified"). A mix needs the total
+ * up front, because that is the number the session count is comparable to.
+ */
+function describeChanges(d: SessionDelta): string {
+  const total = d.changes.length;
+  if (total === 0) return "no files changed";
+  const kinds: readonly (readonly [number, string])[] = [
+    [d.added, "added"],
+    [d.modified, "modified"],
+    [d.deleted, "deleted"],
+  ];
+  const present = kinds.filter(([n]) => n > 0);
+  const only = present[0];
+  if (present.length === 1 && only) return `${plural(only[0], "file")} ${only[1]}`;
+  return `${plural(total, "file")} changed (${present.map(([n, l]) => `${n} ${l}`).join(", ")})`;
 }
 
 /**
@@ -42,15 +66,11 @@ export function renderOneLine(
     return null;
   }
 
-  const counts: string[] = [];
-  if (turn.added) counts.push(`+${turn.added}`);
-  if (turn.modified) counts.push(`~${turn.modified}`);
-  if (turn.deleted) counts.push(`-${turn.deleted}`);
-  const turnCount = turn.changes.length;
-
-  let line = `🦫 Turn: ${turnCount} changed`;
-  if (counts.length > 0) line += ` (${counts.join(", ")})`;
-  line += ` · Session: ${session.changes.length} changed`;
+  // "Turn" = files differing from the end of the previous turn.
+  // "Session" = distinct files differing from the session baseline. A file edited
+  // in five turns is one file in both counts — these are files, not edits.
+  let line = `🦫 Turn: ${describeChanges(turn)}`;
+  line += ` · Session: ${plural(session.changes.length, "file")} touched`;
 
   const verification = receiptsFragment(turnReceipts);
   if (verification) line += ` · ${verification}`;
@@ -230,6 +250,19 @@ const OUTCOME_TEXT: Record<VerificationOutcome, string> = {
   unknown: "ran, but its exit status could not be trusted",
 };
 
+// The compact line can only afford "? typecheck". Here there is room to say
+// which kind of unknown it is — the reasons call for different responses:
+// re-run without the pipe, versus the command never finished at all.
+const REASON_TEXT: Record<UnknownReason, string> = {
+  "piped-exit-status":
+    "the command was piped, so the exit status belongs to the last stage of the pipeline, not to the command itself",
+  "masked-exit-status":
+    "a shell construct (`||`, `;`, `&`, `$(…)`, `if`) can hide a failure behind a zero exit status",
+  interrupted: "the command was interrupted before it finished, so it reached no verdict",
+  "unconfirmed-shell":
+    "the command could not be confirmed as coming from the Bash tool, and the shell rules used here are POSIX-specific",
+};
+
 function pushVerification(
   lines: string[],
   turn: SessionDelta,
@@ -253,14 +286,16 @@ function pushVerification(
     }
   } else {
     for (const s of summary) {
-      lines.push(`- **${s.category}** — ${OUTCOME_TEXT[s.outcome]}`);
+      const why = s.reason ? ` — ${REASON_TEXT[s.reason]}` : "";
+      lines.push(`- **${s.category}** — ${OUTCOME_TEXT[s.outcome]}${why}`);
     }
     lines.push("");
     if (summary.some((s) => s.outcome === "unknown")) {
       lines.push(
-        `> An outcome is \`unknown\` when the command's shell form can hide a failure ` +
-          `(for example \`npm test || true\`, a pipe, or a trailing \`;\`). TechyBara ` +
-          `records that the command ran, but will not call it a pass.`,
+        `> \`unknown\` means TechyBara saw the command run but cannot vouch for the ` +
+          `result. It is not a failure, and it is not a pass — it is the absence of ` +
+          `trustworthy evidence. Re-running the command on its own usually turns it ` +
+          `into a definite \`✓\` or \`✗\`.`,
       );
       lines.push("");
     }

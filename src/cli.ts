@@ -188,6 +188,11 @@ async function receiptBody(args: readonly string[], ok: boolean): Promise<number
       ...(hook.isInterrupt !== undefined ? { interrupted: hook.isInterrupt } : {}),
       // Claude Code's own measurement — we never estimate it ourselves.
       ...(hook.durationMs !== undefined ? { durationMs: hook.durationMs } : {}),
+      // The masking rules are POSIX-specific. A payload that does not name the
+      // Bash tool might have come from some other shell, where they would not
+      // apply — so it yields "unknown", not a pass. Reaching here without a
+      // tool_name means the payload was already malformed.
+      shellConfirmed: hook.toolName === "Bash",
     });
     return 0;
   } catch (err) {

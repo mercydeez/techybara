@@ -51,8 +51,8 @@ describe("runReport", () => {
     const first = await runReport(dir, SID);
     expect(first.status).toBe("reported");
     // Turn 1 has no checkpoint, so the turn delta is the session delta.
-    expect(first.oneLine).toContain("Turn: 1 changed");
-    expect(first.oneLine).toContain("Session: 1 changed");
+    expect(first.oneLine).toContain("Turn: 1 file modified");
+    expect(first.oneLine).toContain("Session: 1 file touched");
 
     // Nothing else changed -> same delta -> suppressed
     const second = await runReport(dir, SID);
@@ -68,8 +68,8 @@ describe("runReport", () => {
     const third = await runReport(dir, SID);
     expect(third.status).toBe("reported");
     // Only b.txt moved this turn, but the session total covers both.
-    expect(third.oneLine).toContain("Turn: 1 changed");
-    expect(third.oneLine).toContain("Session: 2 changed");
+    expect(third.oneLine).toContain("Turn: 1 file added");
+    expect(third.oneLine).toContain("Session: 2 files touched");
   });
 
   it("stays silent when nothing changed all session", async () => {

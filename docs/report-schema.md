@@ -140,12 +140,30 @@ the outcome is `fail`.
 
 | `outcome` | Means |
 | --------- | ----- |
-| `success` | The harness reported the tool call as succeeding. |
+| `success` | The harness reported the tool call as succeeding, and the command's shape does not hide a failure. |
 | `fail` | The harness reported the tool call as failing. |
-| `unknown` | The command ran, but its shell form can hide a failure — see below. |
+| `unknown` | No trustworthy result — see `reason`. **Not** a failure. |
 
 `observedThisTurn` is `false` when no verification command was observed in the
 latest turn. That is a neutral statement about what was seen, not a judgement.
+
+**`reason`** is present only when `outcome` is `unknown`, and is a closed enum —
+never free text, because it is written to disk and must be structurally incapable
+of carrying a fragment of the command:
+
+| `reason` | Means | Usual fix |
+| --- | --- | --- |
+| `piped-exit-status` | The command was piped, so the status belongs to the pipeline's last stage. | Re-run without the pipe. |
+| `masked-exit-status` | A construct (`\|\|`, `;`, `&`, `$(…)`, `if`) can hide a failure behind a zero exit. | Re-run the command alone. |
+| `interrupted` | The call never finished, so it reached no verdict. | Re-run it. |
+| `unconfirmed-shell` | The payload could not be confirmed as coming from the Bash tool, and the shape rules are POSIX-specific. | Report it — this shouldn't normally happen. |
+
+There is no `not observed` reason: when nothing was observed there is no receipt
+to attach one to. Use `observedThisTurn` for that.
+
+Redirection (`>`, `>>`, `2>&1`, `&>`, `<`) does **not** produce `unknown` — it
+preserves the exit status. See [shells.md](./shells.md) for the full rule table
+and the evidence behind it.
 
 **`durationMs`** is Claude Code's own `duration_ms` for the run that decided the
 outcome — not a sum across runs, which would describe no single event. It is

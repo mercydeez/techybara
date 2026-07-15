@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Redirection no longer destroys a verification result.** `>`, `>>`, `2>&1`,
+  `&>` and `<` preserve a command's exit status, but they were treated as
+  masking — so the very common `npm run typecheck 2>&1` reported `? typecheck`
+  instead of `✓ typecheck`. Verified in a real shell rather than assumed:
+  `(exit 1) 2>&1` still reports 1, while `(exit 1) | cat` reports 0. Pipelines,
+  `||`, `;`, `&`, `$(…)` and `if` still correctly yield `unknown`.
+
+### Changed
+- **Change counts name their unit.** `Turn: 1 changed (~1)` became
+  `Turn: 1 file modified`, and `Session: 8 changed` became
+  `Session: 8 files touched`. `+1`/`~6` required decoding and never said whether
+  they counted files, edits, hunks, or lines. Every count is **distinct files**;
+  a mix reads `3 files changed (1 added, 2 modified)`.
+- Receipts now record **why** an outcome is `unknown` — `piped-exit-status`,
+  `masked-exit-status`, `interrupted`, or `unconfirmed-shell` — surfaced in
+  `report` and `report --json` (additive within schema v1). The stop line stays
+  compact at `? typecheck`.
+- A payload that cannot be confirmed as coming from the `Bash` tool now yields
+  `unknown` (`unconfirmed-shell`) instead of being judged by POSIX rules that may
+  not apply. A reported *failure* is still trusted, since masking only ever
+  flatters a result.
+
+### Documentation
+- New [docs/shells.md](docs/shells.md): the exact shell semantics assumed, the
+  evidence for each rule, nested-shell exit propagation (checked against Claude
+  Code 2.1.209 on Windows), and what is deliberately unsupported.
+
 ## [0.2.0] - 2026-07-15
 
 ### Added — Trust Receipts
