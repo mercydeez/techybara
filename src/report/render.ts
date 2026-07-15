@@ -43,34 +43,31 @@ function describeChanges(d: SessionDelta): string {
   return `${plural(total, "file")} changed (${present.map(([n, l]) => `${n} ${l}`).join(", ")})`;
 }
 
-/**
- * One-line summary for the in-session message. Returns null when there is
- * nothing worth showing, so unchanged turns stay silent.
- *
- * Receipts only decorate a line that already exists — they never create one.
- * A verification that ran on a turn which changed no files is already visible
- * to the user in the transcript, and inventing a banner for it would make the
- * common case noisy for no new information.
- */
+/** One-line summary for the in-session message. */
 export function renderOneLine(
   turn: SessionDelta,
   session: SessionDelta,
   turnReceipts: readonly Receipt[] = [],
 ): string | null {
-  if (session.changes.length === 0) {
-    // Silence must mean "verified: nothing differs". A degraded pass with no
-    // listable changes is NOT that — say so instead of staying quiet.
-    if (session.degraded) {
-      return "🦫 ⚠️ Partial report — some changes could not be verified this turn (see .techybara report)";
-    }
-    return null;
-  }
+  const partial = turn.degraded || session.degraded;
+  const hasUnverifiedReceipt = turnReceipts.some((receipt) => receipt.outcome !== "success");
+  const hasReportableEvidence =
+    turn.changes.length > 0 ||
+    session.changes.length > 0 ||
+    partial ||
+    session.headChanged ||
+    hasUnverifiedReceipt;
+  if (!hasReportableEvidence) return null;
 
   // "Turn" = files differing from the end of the previous turn.
-  // "Session" = distinct files differing from the session baseline. A file edited
-  // in five turns is one file in both counts — these are files, not edits.
+  // "Session" = the end-state diff from the session baseline.
   let line = `🦫 Turn: ${describeChanges(turn)}`;
-  line += ` · Session: ${plural(session.changes.length, "file")} touched`;
+  line +=
+    session.changes.length === 0
+      ? ` · Session: no files differ from baseline`
+      : ` · Session: ${plural(session.changes.length, "file")} ${
+          session.changes.length === 1 ? "differs" : "differ"
+        } from baseline`;
 
   const verification = receiptsFragment(turnReceipts);
   if (verification) line += ` · ${verification}`;
@@ -81,7 +78,7 @@ export function renderOneLine(
   if (session.headChanged) {
     line += ` · ⚠️ history moved`;
   }
-  if (session.degraded) {
+  if (partial) {
     // A degraded delta is a partial verification; say so plainly rather than
     // dressing it up as a normal success.
     return `🦫 ⚠️ Partial report — ${line.replace(/^🦫 /, "")} · verification limited`;
@@ -139,7 +136,7 @@ export function renderMarkdown(
   meta: ReportMeta,
 ): string {
   const lines: string[] = [];
-  lines.push(`# 🦫 TechyBara trust receipt`);
+  lines.push(`# 🦫 TechyBara evidence receipt`);
   lines.push("");
   lines.push(`- Session: \`${meta.sessionId}\``);
   lines.push(`- Turn: ${meta.turnNumber}`);
@@ -153,13 +150,11 @@ export function renderMarkdown(
     lines.push("");
   }
 
-  if (session.changes.length === 0) {
-    if (!one) {
-      lines.push(`No files changed during this session.`);
-      lines.push("");
-    }
-    pushNotes(lines, session);
+  if (session.changes.length === 0 && turn.changes.length === 0) {
+    lines.push(`No files currently differ from the session baseline.`);
+    lines.push("");
     pushVerification(lines, turn, session, meta);
+    pushNotes(lines, session);
     lines.push(limitsFooter());
     return lines.join("\n") + "\n";
   }
@@ -176,6 +171,17 @@ export function renderMarkdown(
     }
   }
   lines.push("");
+
+  if (session.changes.length === 0) {
+    lines.push(`## Session end state`);
+    lines.push("");
+    lines.push(`No files currently differ from the session baseline.`);
+    lines.push("");
+    pushVerification(lines, turn, session, meta);
+    pushNotes(lines, session);
+    lines.push(limitsFooter());
+    return lines.join("\n") + "\n";
+  }
 
   // Present in the session but not in this turn: changed earlier and left alone
   // since. Worth separating — a reviewer reading a turn report should still

@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
-import { writeFileAtomic } from "../core/fsutil.js";
+import { acquireLock, writeFileAtomic } from "../core/fsutil.js";
 import { computeDelta, deltaFingerprint, type SessionDelta } from "../core/diff.js";
 import { EMPTY_TREE, diffNameStatus, getToplevel, gitAvailable, treeHashesAt } from "../core/git.js";
 import { compileGlobs } from "../core/glob.js";
@@ -16,14 +16,20 @@ import {
   reportPath,
   reportStatePath,
   sessionDir,
+  sessionLockPath,
 } from "../core/paths.js";
 import { compileProtected } from "../core/protected.js";
 import { captureSnapshot, readSnapshot, type CaptureOptions } from "../core/snapshot.js";
-import { CHECKPOINT_VERSION, type Checkpoint, type Snapshot } from "../core/types.js";
+import {
+  CHECKPOINT_VERSION,
+  MAX_CLAIMED_RECEIPTS,
+  type Checkpoint,
+  type Snapshot,
+} from "../core/types.js";
 import {
   hasUnverified,
   readReceipts,
-  receiptsSince,
+  unclaimedReceipts,
   summarize,
   type Receipt,
 } from "./receipt.js";
@@ -35,7 +41,8 @@ export type ReportStatus =
   | "no-changes" // nothing changed this session
   | "baseline-missing" // baseline was absent/corrupt -> re-established, nothing to report
   | "not-a-repo" // deliberately silent: TechyBara safely no-ops outside a repo
-  | "git-unavailable"; // MUST be visible: we cannot verify anything without git
+  | "git-unavailable" // MUST be visible: we cannot verify anything without git
+  | "concurrent"; // another live process holds this session's lock; it reports the turn
 
 export interface ReportRunResult {
   status: ReportStatus;
@@ -62,6 +69,10 @@ export interface ReportOptions extends CaptureOptions {
    * next automatic hook banner. Defaults to true (hook behavior).
    */
   persistState?: boolean;
+  /** Test-only override of the receipt-claim cap. */
+  maxClaimedReceipts?: number;
+  /** Test-only override of the lock staleness threshold. */
+  lockStaleMs?: number;
 }
 
 export async function runReport(
@@ -83,6 +94,30 @@ export async function runReport(
     return { status: "not-a-repo" };
   }
 
+  // State-writing runs serialize on the session lock: two concurrent Stop hooks
+  // would otherwise both read the checkpoint, both claim the same receipts, and
+  // both advance the turn counter. The loser skips — the winner reports this
+  // turn, and the loser's evidence is picked up next turn (over-reports later,
+  // never doubles, never silences). Manual runs are read-only and need no lock.
+  if (!persistState) return reportLocked(top, sessionId, now, opts, false);
+  mkdirSync(sessionDir(top, sessionId), { recursive: true });
+  const release = acquireLock(sessionLockPath(top, sessionId), opts.lockStaleMs);
+  if (!release) return { status: "concurrent" };
+  try {
+    return await reportLocked(top, sessionId, now, opts, true);
+  } finally {
+    // A watchdog process.exit skips this; the lock is then reclaimed as stale.
+    release();
+  }
+}
+
+async function reportLocked(
+  top: string,
+  sessionId: string,
+  now: Date,
+  opts: ReportOptions,
+  persistState: boolean,
+): Promise<ReportRunResult> {
   const config = loadConfig(top);
   const bpath = baselinePath(top, sessionId);
   const baseline = existsSync(bpath) ? readSnapshot(bpath) : null;
@@ -123,10 +158,23 @@ export async function runReport(
 
   const turnNumber = (checkpoint?.turn ?? 0) + 1;
   const sessionReceipts = readReceipts(top, sessionId);
-  // A receipt belongs to this turn if it landed after the previous turn closed.
+  // A receipt belongs to the first turn whose Stop hook observes it unclaimed.
   // Bucketing here — rather than stamping a turn id at write time — keeps the
-  // per-Bash-call hook from having to read this file at all.
-  const turnReceipts = receiptsSince(sessionReceipts, checkpoint?.snapshot.createdAt ?? null);
+  // per-Bash-call hook from having to read any state at all, and keeps
+  // attribution independent of clocks: a lost/corrupt checkpoint re-attributes
+  // everything to this turn (over-reports), never drops or double-counts.
+  const claimed = checkpoint?.claimedReceipts ?? [];
+  const turnReceipts = unclaimedReceipts(sessionReceipts, claimed);
+
+  if (checkpoint?.claimsTruncated) {
+    // The claim list dropped ids at some earlier turn, so some of this turn's
+    // "unclaimed" receipts may be re-attributed older ones. Partial evidence
+    // must be visible, and a degraded turn is never suppressed.
+    turn.degraded = true;
+    turn.notes.push(
+      "Receipt-to-turn attribution is partial: the per-session claim cap was exceeded, so some earlier verification receipts may be re-attributed to this turn.",
+    );
+  }
 
   const markdown = renderMarkdown(turn, session, {
     sessionId,
@@ -146,7 +194,11 @@ export async function runReport(
   const advance = (): void => {
     if (!persistState) return; // a manual `techybara report` must not eat a turn
     try {
-      writeCheckpoint(top, sessionId, turnNumber, current);
+      writeCheckpoint(top, sessionId, turnNumber, current, {
+        claimed: [...claimed, ...turnReceipts.map((r) => r.id)],
+        alreadyTruncated: checkpoint?.claimsTruncated ?? false,
+        cap: opts.maxClaimedReceipts ?? MAX_CLAIMED_RECEIPTS,
+      });
     } catch {
       // The report is already written; failing to advance only means the next
       // turn's delta spans two turns — it over-reports, never under-reports.
@@ -183,13 +235,20 @@ export async function runReport(
   const fingerprint = suppressionFingerprint(session, turnReceipts);
   const statePath = reportStatePath(top, sessionId);
   const last = readLastFingerprint(statePath);
-  // Two things must never be repeat-suppressed, because silence has to mean
+  // Fresh turn evidence must never be repeat-suppressed, because silence has to mean
   // "checked, complete, nothing new":
-  //  - a degraded/partial comparison, and
+  //  - a file changed again, even if it is still the same "modified" session path,
+  //  - HEAD moved again,
+  //  - a degraded/partial comparison, or
   //  - a turn whose verification failed or could not be trusted.
-  // Without the second rule, a turn that changed nothing new but flipped tests
+  // Without the last rule, a turn that changed nothing new but flipped tests
   // from passing to failing would hash identically and go unreported.
-  const suppressible = !session.degraded && !hasUnverified(turnReceipts);
+  const suppressible =
+    turn.changes.length === 0 &&
+    !turn.headChanged &&
+    !turn.degraded &&
+    !session.degraded &&
+    !hasUnverified(turnReceipts);
   if (suppressible && fingerprint === last) {
     advance();
     return { ...result, status: "suppressed", oneLine };
@@ -217,8 +276,28 @@ function suppressionFingerprint(session: SessionDelta, turnReceipts: readonly Re
   return createHash("sha1").update(material).digest("hex");
 }
 
-function writeCheckpoint(top: string, sessionId: string, turn: number, snapshot: Snapshot): void {
-  const checkpoint: Checkpoint = { version: CHECKPOINT_VERSION, turn, snapshot };
+function writeCheckpoint(
+  top: string,
+  sessionId: string,
+  turn: number,
+  snapshot: Snapshot,
+  claims: { claimed: string[]; alreadyTruncated: boolean; cap: number },
+): void {
+  let claimedReceipts = claims.claimed;
+  // The truncated flag is sticky: once ids have been dropped, any later turn
+  // can see a re-attributed receipt, so every later report must say so.
+  let claimsTruncated = claims.alreadyTruncated;
+  if (claimedReceipts.length > claims.cap) {
+    claimedReceipts = claimedReceipts.slice(claimedReceipts.length - claims.cap);
+    claimsTruncated = true;
+  }
+  const checkpoint: Checkpoint = {
+    version: CHECKPOINT_VERSION,
+    turn,
+    snapshot,
+    claimedReceipts,
+    ...(claimsTruncated ? { claimsTruncated: true } : {}),
+  };
   mkdirSync(sessionDir(top, sessionId), { recursive: true });
   writeFileAtomic(checkpointPath(top, sessionId), JSON.stringify(checkpoint, null, 2) + "\n");
 }
@@ -232,6 +311,12 @@ function readCheckpoint(path: string): Checkpoint | null {
     const snap = parsed.snapshot;
     if (!snap || typeof snap !== "object" || typeof snap.createdAt !== "string") return null;
     if (!snap.entries || typeof snap.entries !== "object") return null;
+    if (
+      !Array.isArray(parsed.claimedReceipts) ||
+      parsed.claimedReceipts.some((id) => typeof id !== "string")
+    ) {
+      return null;
+    }
     return parsed as Checkpoint;
   } catch {
     // A lost checkpoint degrades to "turn delta spans more than one turn",
@@ -263,8 +348,12 @@ async function mergeCommittedChanges(
   const baseRef = baseline.head ?? EMPTY_TREE;
 
   const isIgnored = compileGlobs(config.ignorePaths);
+  const isProtected = compileGlobs(config.protectedPaths);
   const changed = (await diffNameStatus(top, baseRef, current.head)).filter(
-    ({ path }) => path !== ".techybara" && !path.startsWith(".techybara/") && !isIgnored(path),
+    ({ path }) =>
+      path !== ".techybara" &&
+      !path.startsWith(".techybara/") &&
+      (!isIgnored(path) || isProtected(path)),
   );
   if (changed.length === 0) return;
 

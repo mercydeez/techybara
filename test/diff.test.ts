@@ -80,7 +80,7 @@ describe("computeDelta", () => {
   it("propagates degraded status", () => {
     const d = computeDelta(snap({}), snap({ "a.txt": e(null, "??") }, { degraded: true }));
     expect(d.degraded).toBe(true);
-    expect(d.notes.some((n) => /status-only/.test(n))).toBe(true);
+    expect(d.notes.some((n) => /partial/.test(n))).toBe(true);
   });
 
   it("sorts changes by path deterministically", () => {
@@ -115,7 +115,7 @@ describe("renderOneLine", () => {
     const line = renderOneLine(d, d)!;
     // Counts name their unit: files, not edits/hunks/lines.
     expect(line).toContain("Turn: 2 files added");
-    expect(line).toContain("Session: 2 files touched");
+    expect(line).toContain("Session: 2 files differ from baseline");
     expect(line).toContain("protected: .env");
   });
 
@@ -124,7 +124,7 @@ describe("renderOneLine", () => {
     const session = computeDelta(snap({}), snap({ "a.txt": e("y", "??"), "b.txt": e("z", "??") }));
     const line = renderOneLine(turn, session)!;
     expect(line).toContain("Turn: no files changed");
-    expect(line).toContain("Session: 2 files touched");
+    expect(line).toContain("Session: 2 files differ from baseline");
   });
 
   it("names a single kind plainly and spells out a mix", () => {
@@ -149,14 +149,20 @@ describe("renderOneLine", () => {
     expect(line).toContain("✗ lint");
   });
 
-  it("stays silent on an unchanged turn even when a command was observed", () => {
-    // The command's own output is already on screen; a banner would be noise.
+  it("surfaces a failed check even when no files currently differ", () => {
     const d = computeDelta(snap({}), snap({}));
-    expect(
-      renderOneLine(d, d, [
-        { version: 1, category: "test", outcome: "fail", at: "2026-07-13T00:00:01.000Z" },
-      ]),
-    ).toBeNull();
+    const line = renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "fail", at: "2026-07-13T00:00:01.000Z" },
+    ]);
+    expect(line).toContain("Session: no files differ from baseline");
+    expect(line).toContain("✗ test");
+  });
+
+  it("keeps a successful check quiet when no files currently differ", () => {
+    const d = computeDelta(snap({}), snap({}));
+    expect(renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "success", at: "2026-07-13T00:00:01.000Z" },
+    ])).toBeNull();
   });
 });
 
@@ -173,7 +179,17 @@ describe("renderMarkdown", () => {
   it("renders a clean 'no changes' report", () => {
     const d = computeDelta(snap({}), snap({}));
     const md = renderMarkdown(d, d, meta);
-    expect(md).toContain("No files changed during this session.");
+    expect(md).toContain("No files currently differ from the session baseline.");
+  });
+
+  it("shows a revert turn even when the session end state matches the baseline", () => {
+    const turn = computeDelta(snap({ "a.txt": e("changed", ".M") }), snap({}));
+    const session = computeDelta(snap({}), snap({}));
+    const md = renderMarkdown(turn, session, meta);
+    expect(md).toContain("## This turn");
+    expect(md).toContain("a.txt");
+    expect(md).toContain("## Session end state");
+    expect(md).toContain("No files currently differ from the session baseline.");
   });
 
   it("renders protected section and category groups", () => {

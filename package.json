@@ -1,7 +1,7 @@
 {
   "name": "techybara",
   "version": "0.2.0",
-  "description": "Independent, local-first verification of what a Claude Code session actually changed.",
+  "description": "Local-first evidence of what differs after a Claude Code session.",
   "type": "module",
   "bin": {
     "techybara": "dist/cli.js"

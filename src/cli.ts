@@ -6,7 +6,12 @@ import { VERSION } from "./version.js";
 import { init, uninstall } from "./init.js";
 import { writeBaseline } from "./core/snapshot.js";
 import { gitAvailable, getToplevel } from "./core/git.js";
-import { readHookInput, emitSystemMessage, installWatchdog } from "./hooks/adapter.js";
+import {
+  emitSystemMessage,
+  installWatchdog,
+  isExpectedBashOutcome,
+  readHookInput,
+} from "./hooks/adapter.js";
 import { runReport } from "./report/run.js";
 import { classifyCommand, writeReceipt } from "./report/receipt.js";
 import { buildJsonError, buildJsonReport } from "./report/json.js";
@@ -172,8 +177,7 @@ async function receiptBody(args: readonly string[], ok: boolean): Promise<number
   try {
     // The matcher should already restrict us to Bash, but never trust that a
     // payload is what we asked for.
-    if (hook?.toolName !== undefined && hook.toolName !== "Bash") return 0;
-    if (!hook?.command) return 0;
+    if (!hook || !isExpectedBashOutcome(hook, ok) || !hook.command) return 0;
 
     const classification = classifyCommand(hook.command);
     if (!classification) return 0; // not a verification command: no receipt at all
@@ -188,11 +192,10 @@ async function receiptBody(args: readonly string[], ok: boolean): Promise<number
       ...(hook.isInterrupt !== undefined ? { interrupted: hook.isInterrupt } : {}),
       // Claude Code's own measurement — we never estimate it ourselves.
       ...(hook.durationMs !== undefined ? { durationMs: hook.durationMs } : {}),
-      // The masking rules are POSIX-specific. A payload that does not name the
-      // Bash tool might have come from some other shell, where they would not
-      // apply — so it yields "unknown", not a pass. Reaching here without a
-      // tool_name means the payload was already malformed.
-      shellConfirmed: hook.toolName === "Bash",
+      // Stable identity: makes a re-delivered hook for the same tool call
+      // overwrite the same receipt instead of minting a duplicate.
+      ...(hook.toolUseId !== undefined ? { toolUseId: hook.toolUseId } : {}),
+      shellConfirmed: true,
     });
     return 0;
   } catch (err) {

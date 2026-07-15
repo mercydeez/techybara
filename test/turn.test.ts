@@ -143,8 +143,11 @@ describe("turn vs session deltas", () => {
     const res = await runReport(dir, SID);
 
     expect(res.session?.changes).toHaveLength(0);
-    expect(res.status).toBe("no-changes");
-    // The turn still saw it move back — that is a real change this turn.
+    // The turn still saw it move back — that is a real change this turn, and
+    // revert turns are visible (audit fix), so the turn is reported even
+    // though the session is back at baseline.
+    expect(res.status).toBe("reported");
+    expect(res.oneLine).toContain("no files differ from baseline");
     expect(res.turn?.changes.map((c) => c.path)).toEqual(["a.txt"]);
   });
 
@@ -243,7 +246,7 @@ describe("verification is never silently suppressed", () => {
   it("re-reports when verification flips to failing even though the delta is identical", async () => {
     await writeBaseline(dir, SID);
     writeFileSync(join(dir, "a.txt"), "a1\n");
-    writeReceipt(dir, SID, { category: "test", masked: false }, { succeeded: true });
+    writeReceipt(dir, SID, { category: "test", maskedBy: null }, { succeeded: true });
     const t1 = await runReport(dir, SID);
     expect(t1.status).toBe("reported");
     expect(t1.oneLine).toContain("✓ test");
@@ -251,7 +254,7 @@ describe("verification is never silently suppressed", () => {
     // Nothing new changed on disk, but the tests now fail. The file delta
     // fingerprint is identical — without folding verification into the
     // suppression key this turn would be silently swallowed.
-    writeReceipt(dir, SID, { category: "test", masked: false }, { succeeded: false });
+    writeReceipt(dir, SID, { category: "test", maskedBy: null }, { succeeded: false });
     const t2 = await runReport(dir, SID);
     expect(t2.status).toBe("reported");
     expect(t2.oneLine).toContain("✗ test");
@@ -260,7 +263,7 @@ describe("verification is never silently suppressed", () => {
   it("never suppresses a turn whose verification failed, even on repeat", async () => {
     await writeBaseline(dir, SID);
     writeFileSync(join(dir, "a.txt"), "a1\n");
-    writeReceipt(dir, SID, { category: "test", masked: false }, { succeeded: false });
+    writeReceipt(dir, SID, { category: "test", maskedBy: null }, { succeeded: false });
     expect((await runReport(dir, SID)).status).toBe("reported");
     // Identical state and identical failing receipt: still must not go quiet.
     expect((await runReport(dir, SID)).status).toBe("reported");
@@ -269,7 +272,7 @@ describe("verification is never silently suppressed", () => {
   it("never suppresses a turn whose outcome could not be trusted", async () => {
     await writeBaseline(dir, SID);
     writeFileSync(join(dir, "a.txt"), "a1\n");
-    writeReceipt(dir, SID, { category: "test", masked: true }, { succeeded: true }); // -> unknown
+    writeReceipt(dir, SID, { category: "test", maskedBy: "masked-exit-status" }, { succeeded: true }); // -> unknown
     expect((await runReport(dir, SID)).status).toBe("reported");
     expect((await runReport(dir, SID)).status).toBe("reported");
   });
@@ -277,14 +280,13 @@ describe("verification is never silently suppressed", () => {
   it("attributes receipts to the turn they landed in", async () => {
     await writeBaseline(dir, SID);
     writeFileSync(join(dir, "a.txt"), "a1\n");
-    writeReceipt(dir, SID, { category: "test", masked: false }, { succeeded: true });
+    writeReceipt(dir, SID, { category: "test", maskedBy: null }, { succeeded: true });
     const t1 = await runReport(dir, SID);
     expect(t1.turnReceipts).toHaveLength(1);
 
-    // Turn 2 runs lint only; the earlier test receipt belongs to turn 1.
-    await new Promise((r) => setTimeout(r, 5)); // distinct ISO timestamp
+    // Turn 2 runs lint only; the earlier test receipt was claimed by turn 1.
     writeFileSync(join(dir, "b.txt"), "b1\n");
-    writeReceipt(dir, SID, { category: "lint", masked: false }, { succeeded: true });
+    writeReceipt(dir, SID, { category: "lint", maskedBy: null }, { succeeded: true });
     const t2 = await runReport(dir, SID);
 
     expect(t2.turnReceipts?.map((r) => r.category)).toEqual(["lint"]);

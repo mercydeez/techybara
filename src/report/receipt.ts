@@ -51,8 +51,8 @@ export interface Receipt {
   category: VerificationCategory;
   outcome: VerificationOutcome;
   /**
-   * ISO-8601. Also how a receipt is attributed to a turn: the report buckets on
-   * the previous checkpoint's createdAt, so the hot path never reads state.
+   * ISO-8601. Display and ordering only — turn attribution uses the receipt's
+   * id (its filename) against the checkpoint's claim list, never this clock.
    */
   at: string;
   /**
@@ -82,6 +82,13 @@ export interface Observation {
    * the analysis does not apply and no confident verdict is available.
    */
   shellConfirmed?: boolean;
+  /**
+   * The harness's stable id for the tool call (`tool_use_id`). Opaque and
+   * content-free. When present it names the receipt file, so a re-delivered
+   * hook for the same call overwrites the same receipt instead of minting a
+   * duplicate — idempotency by construction, no coordination needed.
+   */
+  toolUseId?: string;
 }
 
 /** An outcome plus, when it is "unknown", which kind of unknown. */
@@ -90,17 +97,81 @@ export interface Verdict {
   reason?: UnknownReason;
 }
 
-// Ordered: first match wins, so `npm run typecheck` is typecheck rather than
-// being caught by a looser rule later. Matched against the whole command, which
-// is examined in-process and then discarded — never persisted.
+// Classification is invocation-shaped, not keyword-shaped. Matching a word
+// anywhere produced false receipts for echo output, comments, the POSIX test
+// builtin, and paths whose names merely contain a verification keyword.
+// Prefer a missed custom wrapper over claiming verification that did not run.
 const CATEGORY_RULES: readonly (readonly [VerificationCategory, RegExp])[] = [
-  ["typecheck", /\b(tsc|typecheck|type-check|mypy|pyright|flow\s+check)\b/],
-  ["package", /\b(npm\s+pack|verify-pack|npm\s+publish\s+--dry-run|twine\s+check)\b/],
-  ["format", /\b(prettier|gofmt|black|rustfmt|dotnet\s+format|npm\s+run\s+format)\b/],
-  ["lint", /\b(eslint|lint|ruff|flake8|pylint|clippy|golangci-lint|shellcheck)\b/],
-  ["test", /\b(test|vitest|jest|mocha|pytest|unittest|rspec|go\s+test|cargo\s+test|phpunit)\b/],
-  ["build", /\b(build|tsc\s+-p|make|cargo\s+build|go\s+build|webpack|vite\s+build)\b/],
+  [
+    "typecheck",
+    /^(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:typecheck|type-check|check(?::|-)?types?)|(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+dlx)\s+)?(?:[^\s]+[\\/])?(?:tsc|mypy|pyright)(?:\.exe)?|(?:[^\s]+[\\/])?flow(?:\.exe)?\s+check|cargo\s+check)(?=\s|$)/,
+  ],
+  ["package", /^(?:npm\s+pack|npm\s+publish\s+--dry-run|twine\s+check|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?verify-pack)(?=\s|$)/],
+  [
+    "format",
+    /^(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?format(?::[A-Za-z0-9_.-]+)?|(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+dlx)\s+)?(?:[^\s]+[\\/])?(?:prettier|gofmt|black|rustfmt)(?:\.exe)?|dotnet\s+format)(?=\s|$)/,
+  ],
+  [
+    "lint",
+    /^(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?lint(?::[A-Za-z0-9_.-]+)?|(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+dlx)\s+)?(?:[^\s]+[\\/])?(?:eslint|ruff|flake8|pylint|golangci-lint|shellcheck)(?:\.exe)?|cargo\s+clippy)(?=\s|$)/,
+  ],
+  [
+    "test",
+    /^(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?::[A-Za-z0-9_.-]+)?|(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+dlx)\s+)?(?:[^\s]+[\\/])?(?:vitest|jest|mocha|pytest|rspec|phpunit)(?:\.exe)?|python(?:3)?\s+-m\s+(?:pytest|unittest)|go\s+test|cargo\s+test|dotnet\s+test|mvn\s+test|(?:[^\s]+[\\/])?(?:gradle|gradlew)(?:\.bat)?\s+test|make\s+test)(?=\s|$)/,
+  ],
+  [
+    "build",
+    /^(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build(?::[A-Za-z0-9_.-]+)?|cargo\s+build|go\s+build|(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+dlx)\s+)?(?:[^\s]+[\\/])?webpack(?:\.exe)?|(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn\s+dlx)\s+)?(?:[^\s]+[\\/])?vite(?:\.exe)?\s+build|(?:[^\s]+[\\/])?make(?:\.exe)?)(?=\s|$)/,
+  ],
 ];
+
+/**
+ * Keep only unquoted shell syntax and strip comments. This is not an executor
+ * or a full shell parser; it is a one-way safety filter. Nested commands passed
+ * as quoted strings are deliberately not classified.
+ */
+function shellCode(command: string): string {
+  let out = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote) {
+      const activeQuote = quote;
+      if (activeQuote === '"' && ch === "\\" && i + 1 < command.length) {
+        out += "  ";
+        i++;
+        continue;
+      }
+      if (ch === activeQuote) quote = null;
+      out += " ";
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      out += " ";
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      out += "  ";
+      i++;
+      continue;
+    }
+    const previous = i === 0 ? "" : command[i - 1]!;
+    if (ch === "#" && (i === 0 || /\s|[;&|()]/.test(previous))) {
+      while (i + 1 < command.length && command[i + 1] !== "\n") i++;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function commandSegments(code: string): string[] {
+  return code
+    .split(/&&|\|\||[;|&()\r\n]/)
+    .map((segment) => segment.trim().replace(/^(?:if|while|until)\s+/, "").replace(/^!\s*/, ""))
+    .filter((segment) => segment.length > 0);
+}
 
 /**
  * Constructs that are NOT masking, stripped before the masking scan.
@@ -145,14 +216,18 @@ function maskReason(cmd: string): UnknownReason | null {
   // pipeline. It is not a pipeline — it swallows the failure outright.
   if (/\|\|/.test(neutral)) return "masked-exit-status";
   if (/\|/.test(neutral)) return "piped-exit-status";
-  if (/[;&`]|\$\(|\bif\b|\bwhile\b|\bset\s+\+e\b/.test(neutral)) return "masked-exit-status";
+  if (/[;&`!\r\n]|\$\(|\bif\b|\bwhile\b|\buntil\b|\bcase\b|\bset\s+\+e\b/.test(neutral)) {
+    return "masked-exit-status";
+  }
   return null;
 }
 
 export interface Classification {
   category: VerificationCategory;
-  /** Null when the exit status is trustworthy; otherwise why it is not. */
+  /** Null when a successful tool status proves the check succeeded. */
   maskedBy: UnknownReason | null;
+  /** Why a failed tool status may not belong to the classified check. */
+  failureMaskedBy?: UnknownReason | null;
 }
 
 /**
@@ -164,10 +239,19 @@ export function classifyCommand(command: string): Classification | null {
   const cmd = command.trim();
   if (cmd.length === 0) return null;
 
-  const category = CATEGORY_RULES.find(([, re]) => re.test(cmd))?.[0];
+  const code = shellCode(cmd);
+  const segments = commandSegments(code);
+  const category = CATEGORY_RULES.find(([, re]) =>
+    segments.some((segment) => re.test(segment)),
+  )?.[0];
   if (!category) return null;
 
-  return { category, maskedBy: maskReason(cmd) };
+  const maskedBy = maskReason(code);
+  return {
+    category,
+    maskedBy,
+    failureMaskedBy: maskedBy ?? (/&&/.test(code) ? "masked-exit-status" : null),
+  };
 }
 
 /**
@@ -181,10 +265,11 @@ export function decideOutcome(classification: Classification, observed: Observat
   // anything about the code. This is the only case where we downgrade a
   // "failure" rather than trust it.
   if (observed.interrupted) return { outcome: "unknown", reason: "interrupted" };
-  // A masked command that FAILED still failed — masking only ever makes an exit
-  // status look better than reality, so a failure is trustworthy as-is. This
-  // holds regardless of shell, so it is decided before the shell check.
-  if (!observed.succeeded) return { outcome: "fail" };
+  if (!observed.succeeded) {
+    const reason = classification.failureMaskedBy ?? classification.maskedBy;
+    if (reason) return { outcome: "unknown", reason };
+    return { outcome: "fail" };
+  }
   // Every rule below reads POSIX shell syntax. If we cannot confirm the command
   // came from the Bash tool, those rules may not apply — so we cannot claim a
   // pass, even though the tool call succeeded.
@@ -226,9 +311,24 @@ export function writeReceipt(
   // parallel, so several receipt processes can race here.
   mkdirSync(dir, { recursive: true });
   // One file per receipt, never an append or a read-modify-write of a shared
-  // array: parallel hooks would interleave or lose writes. A uuid name makes
-  // collisions impossible without needing any coordination.
-  writeFileAtomic(join(dir, `${randomUUID()}.json`), JSON.stringify(receipt) + "\n");
+  // array: parallel hooks would interleave or lose writes. The name IS the
+  // identity: tool_use_id keyed names dedupe re-delivered events atomically,
+  // and distinct calls can never collide without coordination.
+  writeFileAtomic(join(dir, `${receiptFileId(observed)}.json`), JSON.stringify(receipt) + "\n");
+}
+
+/**
+ * Stable receipt identity. `<tool_use_id>-<ok|fail>` when the harness supplied
+ * an id: duplicate deliveries of the same event overwrite one file, while the
+ * (should-be-impossible) case of both events firing for one call keeps both
+ * receipts and lets worst-outcome-wins summarization report it honestly.
+ * Without an id (manual runs, older harnesses) fall back to a uuid — unique,
+ * merely not idempotent.
+ */
+function receiptFileId(observed: Observation): string {
+  const cleaned = (observed.toolUseId ?? "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
+  if (!cleaned || cleaned === "." || cleaned === "..") return randomUUID();
+  return `${cleaned}-${observed.succeeded ? "ok" : "fail"}`;
 }
 
 const UNKNOWN_REASONS: readonly string[] = [
@@ -237,31 +337,58 @@ const UNKNOWN_REASONS: readonly string[] = [
   "interrupted",
   "unconfirmed-shell",
 ];
+const VERIFICATION_CATEGORIES: readonly VerificationCategory[] = [
+  "typecheck",
+  "package",
+  "format",
+  "lint",
+  "test",
+  "build",
+];
 
 function parseReceipt(raw: string): Receipt | null {
   try {
     const p = JSON.parse(raw) as Partial<Receipt>;
     if (p.version !== RECEIPT_VERSION) return null;
     if (typeof p.category !== "string" || typeof p.at !== "string") return null;
+    if (!VERIFICATION_CATEGORIES.includes(p.category as VerificationCategory)) return null;
+    const atMs = Date.parse(p.at);
+    if (!Number.isFinite(atMs)) return null;
+    // Normalize before lexical sorting and turn-boundary comparison.
+    p.at = new Date(atMs).toISOString();
     if (p.outcome !== "success" && p.outcome !== "fail" && p.outcome !== "unknown") return null;
     // Drop an unrecognized reason rather than surfacing it: the field is meant
     // to be a closed enum, and a receipt carrying free text would defeat that.
     if (p.reason !== undefined && !UNKNOWN_REASONS.includes(p.reason)) delete p.reason;
+    if (
+      p.durationMs !== undefined &&
+      (typeof p.durationMs !== "number" || !Number.isFinite(p.durationMs) || p.durationMs < 0)
+    ) delete p.durationMs;
+    if (p.outcome !== "unknown") delete p.reason;
     return p as Receipt;
   } catch {
     return null;
   }
 }
 
-/** All receipts for a session, oldest first. Unreadable files are skipped. */
-export function readReceipts(top: string, sessionId: string): Receipt[] {
+/** A receipt plus its on-disk identity (filename minus ".json"). */
+export interface StoredReceipt extends Receipt {
+  id: string;
+}
+
+/**
+ * All receipts for a session, oldest first (id tiebreak, so parallel hooks
+ * sharing a millisecond still read back deterministically). Unreadable files
+ * are skipped.
+ */
+export function readReceipts(top: string, sessionId: string): StoredReceipt[] {
   let names: string[];
   try {
     names = readdirSync(receiptsDir(top, sessionId));
   } catch {
     return []; // no receipts directory: nothing was observed
   }
-  const out: Receipt[] = [];
+  const out: StoredReceipt[] = [];
   for (const name of names) {
     // A hard-killed hook leaves a `<uuid>.json.tmp-<pid>-<ts>` sibling behind.
     // Do not "simplify" this to a bare readdir — half-written temp files must
@@ -269,18 +396,28 @@ export function readReceipts(top: string, sessionId: string): Receipt[] {
     if (!name.endsWith(".json")) continue;
     try {
       const r = parseReceipt(readFileSync(join(receiptsDir(top, sessionId), name), "utf8"));
-      if (r) out.push(r);
+      if (r) out.push({ ...r, id: name.slice(0, -".json".length) });
     } catch {
       // unreadable receipt: skip it rather than fail the whole report
     }
   }
-  return out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  return out.sort((a, b) =>
+    a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
 }
 
-/** Receipts recorded at or after `since` — i.e. during the current turn. */
-export function receiptsSince(receipts: readonly Receipt[], since: string | null): Receipt[] {
-  if (since === null) return [...receipts];
-  return receipts.filter((r) => r.at >= since);
+/**
+ * Receipts not yet attributed to a closed turn — i.e. this turn's receipts.
+ * Set-membership, not timestamps: a receipt written by a delayed hook process,
+ * or under a stepped clock, can land in a later turn but never in an earlier
+ * one, never in two turns, and never in none.
+ */
+export function unclaimedReceipts(
+  receipts: readonly StoredReceipt[],
+  claimed: readonly string[],
+): StoredReceipt[] {
+  const set = new Set(claimed);
+  return receipts.filter((r) => !set.has(r.id));
 }
 
 const OUTCOME_RANK: Record<VerificationOutcome, number> = { fail: 3, unknown: 2, success: 1 };

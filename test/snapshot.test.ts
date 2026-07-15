@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, unlinkSync, utimesSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureSnapshot, writeBaseline } from "../src/core/snapshot.js";
@@ -61,6 +61,43 @@ describe("captureSnapshot", () => {
       .toString()
       .trim();
     expect(snap.entries["a.txt"]!.hash).toBe(expected);
+  });
+
+  it("detects same-size changes to an already-dirty file above the hash cap", async () => {
+    const path = join(dir, "large.txt");
+    writeFileSync(path, "base\n");
+    commitAll("init");
+
+    const cfg = { ...defaultConfig(), maxFileSizeMB: 0.001 };
+    writeFileSync(path, "A".repeat(5000));
+    const firstTime = new Date("2026-01-01T00:00:00.000Z");
+    utimesSync(path, firstTime, firstTime);
+    const baseline = await captureSnapshot(await top(), "s1", cfg);
+
+    writeFileSync(path, "B".repeat(5000));
+    const secondTime = new Date("2026-01-01T00:01:00.000Z");
+    utimesSync(path, secondTime, secondTime);
+    const current = await captureSnapshot(await top(), "s1", cfg);
+
+    expect(baseline.entries["large.txt"]?.hash).toMatch(/^metadata:/);
+    expect(current.entries["large.txt"]?.hash).toMatch(/^metadata:/);
+    expect(current.entries["large.txt"]?.hash).not.toBe(baseline.entries["large.txt"]?.hash);
+    expect(baseline.degraded).toBe(true);
+    expect(current.degraded).toBe(true);
+    expect(current.note).toContain("size+mtime");
+  });
+
+  it("lets a git-visible protected path override ignorePaths", async () => {
+    const ignoredDir = join(dir, "dist");
+    mkdirSync(ignoredDir);
+    const secret = join(ignoredDir, "signing.pem");
+    writeFileSync(secret, "old\n");
+    commitAll("init");
+    writeFileSync(secret, "new\n");
+
+    const snap = await captureSnapshot(await top(), "s1", defaultConfig());
+    expect(snap.entries["dist/signing.pem"]).toBeDefined();
+    expect(snap.entries["dist/signing.pem"]?.hash).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("captures untracked files", async () => {

@@ -8,12 +8,12 @@ what happens when it cannot be confirmed.
 ## What is actually analysed
 
 Only commands from **Claude Code's `Bash` tool**. The receipt hooks are
-registered with `matcher: "Bash"`, and `cli.ts` re-checks `tool_name` on the
-payload before recording anything. Nothing else reaches the classifier.
+registered with `matcher: "Bash"`, and `cli.ts` re-checks both `tool_name`
+and the expected lifecycle event before recording anything.
 
-On every platform Claude Code supports — including Windows, where it uses Git
-Bash — that tool runs a **POSIX-compatible shell**. So the rules below are
-Bash/POSIX rules, and they are applied only to Bash/POSIX input.
+The current adapter intentionally supports **POSIX-compatible Bash semantics**
+only. On Windows this path was verified with Git Bash; other shell tools are
+outside this adapter rather than assumed equivalent.
 
 ## Rules, and the evidence for them
 
@@ -23,7 +23,7 @@ memory:
 | Construct | Example | Exit status is… | Verdict |
 | --- | --- | --- | --- |
 | plain | `npm test` | the command's | trusted |
-| `&&` | `cd app && npm test` | propagated (short-circuits) | trusted |
+| `&&` | `cd app && npm test` | propagated (short-circuits) | success trusted; composite failure ambiguous |
 | stdout redirect | `npm test > out.log` | **the command's** | trusted |
 | append | `npm test >> out.log` | the command's | trusted |
 | stderr→stdout | `npm run typecheck 2>&1` | **the command's** | trusted |
@@ -36,6 +36,7 @@ memory:
 | background | `npm test &` | the shell's, not the job's | `masked-exit-status` |
 | substitution | `echo $(npm test)` | `echo`'s | `masked-exit-status` |
 | control flow | `if npm test; then …; fi` | the `if`'s | `masked-exit-status` |
+| negation | `! npm test` | inverted | `masked-exit-status` |
 
 Proof for the case that matters most — redirection does **not** mask:
 
@@ -54,10 +55,10 @@ teaches people to ignore `?`.
 
 ## Nested shells
 
-A Bash command may invoke another shell. TechyBara does **not** parse into the
-nested command; it reads the whole string with POSIX rules, which is
-conservative — a `|` inside `powershell -Command "npm test | Select-Object"` is
-seen and downgrades the outcome to `unknown`, which is the right answer anyway.
+A Bash command may invoke another shell. TechyBara does **not** parse quoted
+nested command text. For example, `powershell -Command "npm test"` produces no
+verification receipt; treating an opaque string as a Bash command would be a
+false claim.
 
 Exit-code propagation through a nested shell was checked on Windows against
 Claude Code 2.1.209:
@@ -77,18 +78,16 @@ PowerShell edition.
 
 ## When the shell cannot be confirmed
 
-If a payload reaches the receipt command without `tool_name: "Bash"` — a
-malformed or unexpected payload — the POSIX rules above may not apply. Rather
-than guess, the outcome becomes `unknown` with reason `unconfirmed-shell`.
-
-A failure is still recorded as `fail` even then: masking only ever makes a result
-look *better* than reality, so a reported failure is trustworthy regardless of
-shell.
+If a payload lacks `tool_name: "Bash"`, or its lifecycle event disagrees with
+the registered `--ok`/`--fail` hook, the CLI rejects it without writing a
+receipt. The core verdict model retains `unconfirmed-shell` as a defensive
+state for non-hook callers, but the installed hook path does not accept an
+unconfirmed payload.
 
 ## Not supported
 
 `cmd.exe` and PowerShell are **not** analysed as source shells, because Claude
-Code's Bash tool never produces them. If a future Claude Code runs hooks for a
+Code adapter does not register them. If a future adapter runs hooks for a
 non-POSIX tool, this analysis must not be pointed at it: `cmd.exe` has no `2>&1`
 equivalence with POSIX in all cases, and PowerShell pipelines carry objects with
 their own `$LASTEXITCODE` rules. The safe extension is a per-shell rule set keyed

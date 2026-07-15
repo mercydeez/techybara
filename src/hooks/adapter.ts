@@ -45,6 +45,12 @@ export interface HookPayload {
    * An interrupted command has no verdict — it is not a failure.
    */
   isInterrupt?: boolean;
+  /**
+   * Tool events only: the harness's stable id for this tool call. Opaque and
+   * content-free, so it is safe to persist. It is what makes receipts
+   * idempotent: a re-delivered hook for the same call carries the same id.
+   */
+  toolUseId?: string;
   /** Claude Code's own measurement of how long the tool call took. */
   durationMs?: number;
 }
@@ -63,11 +69,23 @@ function sanitize(parsed: unknown): HookPayload {
     toolName: typeof o.tool_name === "string" ? o.tool_name : undefined,
     command: typeof toolInput.command === "string" ? toolInput.command : undefined,
     isInterrupt: typeof o.is_interrupt === "boolean" ? o.is_interrupt : undefined,
+    toolUseId: typeof o.tool_use_id === "string" ? o.tool_use_id : undefined,
     durationMs: typeof o.duration_ms === "number" ? o.duration_ms : undefined,
   };
 }
 
 /**
+ * Tie the CLI outcome flag to the lifecycle event that actually fired.
+ * Arguments are installation details; the event is the observed evidence.
+ */
+export function isExpectedBashOutcome(payload: HookPayload, succeeded: boolean): boolean {
+  return (
+    payload.toolName === "Bash" &&
+    payload.event === (succeeded ? "PostToolUse" : "PostToolUseFailure")
+  );
+}
+/**
+
  * Read and parse the hook payload from stdin. Returns null for a manual
  * invocation (TTY, empty, or unparseable) so the CLI can fall back to argv.
  * Times out rather than hanging if stdin never closes.

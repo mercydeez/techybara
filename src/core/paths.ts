@@ -39,6 +39,14 @@ export function checkpointPath(top: string, sessionId: string): string {
   return join(sessionDir(top, sessionId), "checkpoint.json");
 }
 
+/**
+ * Cross-process mutex guarding this session's read-modify-write lifecycle
+ * (baseline establishment, checkpoint + receipt-claim advancement).
+ */
+export function sessionLockPath(top: string, sessionId: string): string {
+  return join(sessionDir(top, sessionId), "lock");
+}
+
 /** One file per verification receipt — see report/receipt.ts for why. */
 export function receiptsDir(top: string, sessionId: string): string {
   return join(sessionDir(top, sessionId), "receipts");

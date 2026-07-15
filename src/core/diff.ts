@@ -112,7 +112,7 @@ export function computeDelta(
   }
   const degraded = baseline.degraded || current.degraded;
   if (degraded) {
-    notes.push("Too many changes to hash precisely; this is a status-only summary.");
+    notes.push("Some files could not be content-hashed; this comparison is partial.");
   }
   if (baseline.note) notes.push(`Baseline: ${baseline.note}`);
   if (current.note) notes.push(`Current: ${current.note}`);
