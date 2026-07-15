@@ -169,12 +169,20 @@ describe("large commits stay within the hook budget", () => {
     expect(res.status).toBe("reported");
     expect(res.oneLine).toContain("Session: 300 files touched");
     // Pre-fix this took >5s (one git spawn per path) and the hook watchdog
-    // killed it silently. Batched, it comfortably fits the budget.
+    // killed it silently. Batched, it comfortably fits the budget. This
+    // assertion times ONLY runReport — it is the actual guard.
     expect(elapsed).toBeLessThan(4000);
-    // 30s wrapper timeout covers fixture creation, git ops, and teardown on
-    // slower CI runners; the elapsed<4000 assertion above still guards report speed.
-  }, 30000);
+    // The wrapper below is NOT the guard: it only has to cover this test's
+    // fixture (300 file writes + `git add` + commit) and teardown. On a slow
+    // windows-latest runner that fixture alone blew a 30s wrapper, failing the
+    // test before it ever reached the assertion above — a runner-speed problem
+    // misreporting itself as a report-speed regression. Giving the fixture room
+    // costs nothing, because elapsed<4000 still fails if the report itself slows.
+  }, 60000);
 
+  // Purely functional — no timing assertion — but it still creates a repo,
+  // writes 10 files and commits. vitest's 5s default is not enough for that on
+  // Windows (observed: 10.5s), so it was passing on luck rather than on speed.
   it("marks the report degraded instead of hashing an oversized commit", async () => {
     const cfg = { ...defaultConfig(), maxFiles: 5 };
     await writeBaseline(dir, SID, cfg);
@@ -187,5 +195,5 @@ describe("large commits stay within the hook budget", () => {
     const res = await runReport(dir, SID);
     expect(res.status).toBe("reported");
     expect(res.oneLine).toContain("Partial");
-  });
+  }, 30000);
 });
