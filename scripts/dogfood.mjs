@@ -97,12 +97,15 @@ try {
   const SID = "dogfood-session";
   const hookBase = { session_id: SID, cwd: repo };
   // Shaped after payloads captured from a real Claude Code 2.1.209 session.
+  // tool_use_id must be unique per simulated call, as it is in a real session:
+  // it is the receipt's identity, and reusing one would (correctly) dedupe.
+  let toolUseSeq = 0;
   const bash = (command, extra = {}) => ({
     ...hookBase,
     hook_event_name: "PostToolUse",
     tool_name: "Bash",
     tool_input: { command },
-    tool_use_id: "u1",
+    tool_use_id: `toolu_${++toolUseSeq}`,
     prompt_id: "p1",
     duration_ms: 1234,
     ...extra,
@@ -165,7 +168,7 @@ try {
   const stop1 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
   check("turn 1 reports a banner", stop1.includes("systemMessage"), stop1);
   check("turn 1 names its unit (files, not edits)", stop1.includes("Turn: 3 files changed (1 added, 2 modified)"), stop1);
-  check("turn 1 shows session scope", stop1.includes("Session: 3 files touched"), stop1);
+  check("turn 1 shows session scope", stop1.includes("Session: 3 files differ from baseline"), stop1);
   check("turn 1 shows the passing test", stop1.includes("✓ test"), stop1);
   check("turn 1 surfaces the protected .env", stop1.includes("protected: .env"), stop1);
   check("banner never leaks the secret", !stop1.includes("exfiltrated_new_value"), stop1);
@@ -176,7 +179,7 @@ try {
   tb(["receipt", "--fail"], { ...bash("npm test"), hook_event_name: "PostToolUseFailure" });
   const stop2 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
   check("turn 2 counts only this turn's change", stop2.includes("Turn: 1 file added"), stop2);
-  check("turn 2 keeps the running session total", stop2.includes("Session: 4 files touched"), stop2);
+  check("turn 2 keeps the running session total", stop2.includes("Session: 4 files differ from baseline"), stop2);
   check("turn 2 shows the failing test", stop2.includes("✗ test"), stop2);
 
   // --- 6. A failed verification must never be suppressed ---------------------

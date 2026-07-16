@@ -52,7 +52,7 @@ describe("runReport", () => {
     expect(first.status).toBe("reported");
     // Turn 1 has no checkpoint, so the turn delta is the session delta.
     expect(first.oneLine).toContain("Turn: 1 file modified");
-    expect(first.oneLine).toContain("Session: 1 file touched");
+    expect(first.oneLine).toContain("Session: 1 file differs from baseline");
 
     // Nothing else changed -> same delta -> suppressed
     const second = await runReport(dir, SID);
@@ -69,7 +69,19 @@ describe("runReport", () => {
     expect(third.status).toBe("reported");
     // Only b.txt moved this turn, but the session total covers both.
     expect(third.oneLine).toContain("Turn: 1 file added");
-    expect(third.oneLine).toContain("Session: 2 files touched");
+    expect(third.oneLine).toContain("Session: 2 files differ from baseline");
+  });
+
+  it("reports when the same already-modified file changes again", async () => {
+    await writeBaseline(dir, SID);
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    expect((await runReport(dir, SID)).status).toBe("reported");
+
+    writeFileSync(join(dir, "a.txt"), "three\n");
+    const second = await runReport(dir, SID);
+    expect(second.status).toBe("reported");
+    expect(second.oneLine).toContain("Turn: 1 file modified");
+    expect(second.oneLine).toContain("Session: 1 file differs from baseline");
   });
 
   it("stays silent when nothing changed all session", async () => {
@@ -94,7 +106,10 @@ describe("runReport", () => {
     expect((await runReport(dir, SID)).status).toBe("reported");
 
     writeFileSync(join(dir, "a.txt"), "one\n"); // back to baseline
-    expect((await runReport(dir, SID)).status).toBe("no-changes");
+    const reverted = await runReport(dir, SID);
+    expect(reverted.status).toBe("reported");
+    expect(reverted.oneLine).toContain("Turn: 1 file modified");
+    expect(reverted.oneLine).toContain("Session: no files differ from baseline");
 
     writeFileSync(join(dir, "a.txt"), "two\n"); // same divergence again
     // Pre-fix this was "suppressed": the stale fingerprint silenced a real,
@@ -131,5 +146,15 @@ describe("runReport", () => {
     // a non-ignored change is still reported
     writeFileSync(join(dir, "b.txt"), "real\n");
     expect((await runReport(dir, SID)).status).toBe("reported");
+  });
+  it("stores a bounded, visibly partial Markdown report", async () => {
+    await writeBaseline(dir, SID);
+    writeFileSync(join(dir, "a.txt"), "two\n");
+
+    const res = await runReport(dir, SID, new Date(), { maxReportBytes: 700 });
+    expect(res.status).toBe("reported");
+    expect(res.session?.degraded).toBe(true);
+    expect(res.markdown).toContain("Stored report truncated");
+    expect(Buffer.byteLength(res.markdown ?? "", "utf8")).toBeLessThanOrEqual(700);
   });
 });

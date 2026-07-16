@@ -1,12 +1,23 @@
 #!/usr/bin/env node
-import { appendFileSync, readFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
 import { init, uninstall } from "./init.js";
+import {
+  assertSafeStatePath,
+  ensureSafeStateDirectory,
+  truncateUtf8,
+} from "./core/fsutil.js";
+import { errorLogPath, safeSessionId, stateDir } from "./core/paths.js";
 import { writeBaseline } from "./core/snapshot.js";
 import { gitAvailable, getToplevel } from "./core/git.js";
-import { readHookInput, emitSystemMessage, installWatchdog } from "./hooks/adapter.js";
+import {
+  emitSystemMessage,
+  installWatchdog,
+  isExpectedBashOutcome,
+  readHookInput,
+} from "./hooks/adapter.js";
 import { runReport } from "./report/run.js";
 import { classifyCommand, writeReceipt } from "./report/receipt.js";
 import { buildJsonError, buildJsonReport } from "./report/json.js";
@@ -84,12 +95,31 @@ function flagValue(args: readonly string[], name: string): string | undefined {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 }
 
-/** Best-effort error log; never throws. */
-function safeLogError(cwd: string, err: unknown): void {
+const MAX_ERROR_LOG_BYTES = 64 * 1024;
+const MAX_ERROR_MESSAGE_BYTES = 2 * 1024;
+
+/** Best-effort, repo-rooted, bounded error log; never throws. */
+async function safeLogError(cwd: string, err: unknown): Promise<void> {
   try {
-    const dir = join(cwd, ".techybara");
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(join(dir, "error.log"), `${new Date().toISOString()} ${String(err)}\n`, "utf8");
+    const top = await getToplevel(cwd);
+    if (!top) return;
+    const dir = stateDir(top);
+    const path = errorLogPath(top);
+    ensureSafeStateDirectory(top, dir);
+    assertSafeStatePath(top, path);
+
+    const currentBytes = existsSync(path) ? statSync(path).size : 0;
+    if (currentBytes >= MAX_ERROR_LOG_BYTES) return;
+    const message = truncateUtf8(
+      String(err).replace(/[\r\n]+/g, " "),
+      MAX_ERROR_MESSAGE_BYTES,
+    );
+    const line = `${new Date().toISOString()} ${message}\n`;
+    appendFileSync(
+      path,
+      truncateUtf8(line, MAX_ERROR_LOG_BYTES - currentBytes),
+      "utf8",
+    );
   } catch {
     // give up silently — logging must never break a session
   }
@@ -109,11 +139,15 @@ async function cmdSnapshot(args: readonly string[]): Promise<number> {
 }
 
 async function snapshotBody(args: readonly string[]): Promise<number> {
-  const hook = await readHookInput();
+  const input = await readHookInput();
+  if (input.status === "rejected") return 0;
+  const hook = input.status === "payload" ? input.payload : null;
   const isHook = hook !== null || args.includes("--hook");
   const cwd = hook?.cwd ?? process.cwd();
   try {
-    const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
+    const sessionId = safeSessionId(
+      hook?.sessionId ?? flagValue(args, "--session") ?? "manual",
+    );
     const outcome = await writeBaseline(cwd, sessionId);
     if (!isHook) {
       switch (outcome.status) {
@@ -133,7 +167,7 @@ async function snapshotBody(args: readonly string[]): Promise<number> {
     }
     return 0;
   } catch (err) {
-    safeLogError(cwd, err);
+    await safeLogError(cwd, err);
     return 0; // never break the session
   }
 }
@@ -167,20 +201,23 @@ async function cmdReceipt(args: readonly string[]): Promise<number> {
 }
 
 async function receiptBody(args: readonly string[], ok: boolean): Promise<number> {
-  const hook = await readHookInput();
+  const input = await readHookInput();
+  if (input.status !== "payload") return 0;
+  const hook = input.payload;
   const cwd = hook?.cwd ?? process.cwd();
   try {
     // The matcher should already restrict us to Bash, but never trust that a
     // payload is what we asked for.
-    if (hook?.toolName !== undefined && hook.toolName !== "Bash") return 0;
-    if (!hook?.command) return 0;
+    if (!isExpectedBashOutcome(hook, ok) || !hook.command) return 0;
 
     const classification = classifyCommand(hook.command);
     if (!classification) return 0; // not a verification command: no receipt at all
 
     const top = await getToplevel(cwd);
     if (!top) return 0;
-    const sessionId = hook.sessionId ?? flagValue(args, "--session") ?? "manual";
+    const sessionId = safeSessionId(
+      hook.sessionId ?? flagValue(args, "--session") ?? "manual",
+    );
     writeReceipt(top, sessionId, classification, {
       succeeded: ok,
       // An interrupted command never reached a verdict; it must not read as a
@@ -188,15 +225,14 @@ async function receiptBody(args: readonly string[], ok: boolean): Promise<number
       ...(hook.isInterrupt !== undefined ? { interrupted: hook.isInterrupt } : {}),
       // Claude Code's own measurement — we never estimate it ourselves.
       ...(hook.durationMs !== undefined ? { durationMs: hook.durationMs } : {}),
-      // The masking rules are POSIX-specific. A payload that does not name the
-      // Bash tool might have come from some other shell, where they would not
-      // apply — so it yields "unknown", not a pass. Reaching here without a
-      // tool_name means the payload was already malformed.
-      shellConfirmed: hook.toolName === "Bash",
+      // Stable identity: makes a re-delivered hook for the same tool call
+      // overwrite the same receipt instead of minting a duplicate.
+      ...(hook.toolUseId !== undefined ? { toolUseId: hook.toolUseId } : {}),
+      shellConfirmed: true,
     });
     return 0;
   } catch (err) {
-    safeLogError(cwd, err);
+    await safeLogError(cwd, err);
     return 0; // never break the session
   }
 }
@@ -215,7 +251,7 @@ async function cmdReport(args: readonly string[]): Promise<number> {
     process.stderr.write(`techybara: --json cannot be combined with --hook\n`);
     return 2;
   }
-  const sessionIdForTimeout = flagValue(args, "--session") ?? "manual";
+  const sessionIdForTimeout = safeSessionId(flagValue(args, "--session") ?? "manual");
   // A timeout must still produce a parseable answer on the channel the caller is
   // listening to. In --json mode a systemMessage would corrupt the document, and
   // exiting silently would hand a consumer empty stdout with a success code —
@@ -248,10 +284,33 @@ async function cmdReport(args: readonly string[]): Promise<number> {
 }
 
 async function reportBody(args: readonly string[], json: boolean): Promise<number> {
-  const hook = await readHookInput();
+  const input = args.includes("--hook")
+    ? await readHookInput()
+    : ({ status: "empty" } as const);
+  const fallbackSessionId = safeSessionId(flagValue(args, "--session") ?? "manual");
+  if (input.status === "rejected") {
+    const message = `hook input rejected: ${input.reason}`;
+    if (json) {
+      process.stdout.write(
+        JSON.stringify(
+          buildJsonError(fallbackSessionId, new Date().toISOString(), message),
+          null,
+          2,
+        ) + "\n",
+      );
+      return 1;
+    }
+    if (args.includes("--hook")) {
+      emitSystemMessage("🦫 ⚠️ TechyBara rejected invalid hook input and could not verify this turn.");
+      return 0;
+    }
+    process.stderr.write(`techybara: ${message}\n`);
+    return 2;
+  }
+  const hook = input.status === "payload" ? input.payload : null;
   const isHook = !json && (hook !== null || args.includes("--hook"));
   const cwd = hook?.cwd ?? process.cwd();
-  const sessionId = hook?.sessionId ?? flagValue(args, "--session") ?? "manual";
+  const sessionId = safeSessionId(hook?.sessionId ?? fallbackSessionId);
   try {
     // Manual runs are read-only w.r.t. suppression state: a user debugging with
     // `techybara report` must not silence the next automatic hook banner, or
@@ -302,7 +361,7 @@ async function reportBody(args: readonly string[], json: boolean): Promise<numbe
     }
     return 0;
   } catch (err) {
-    safeLogError(cwd, err);
+    await safeLogError(cwd, err);
     if (json) {
       // A JSON consumer must never get empty stdout and a zero exit. Emit a
       // valid error document on stdout, diagnostics on stderr.

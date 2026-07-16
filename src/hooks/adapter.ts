@@ -45,6 +45,12 @@ export interface HookPayload {
    * An interrupted command has no verdict — it is not a failure.
    */
   isInterrupt?: boolean;
+  /**
+   * Tool events only: the harness's stable id for this tool call. Opaque and
+   * content-free, so it is safe to persist. It is what makes receipts
+   * idempotent: a re-delivered hook for the same call carries the same id.
+   */
+  toolUseId?: string;
   /** Claude Code's own measurement of how long the tool call took. */
   durationMs?: number;
 }
@@ -63,40 +69,85 @@ function sanitize(parsed: unknown): HookPayload {
     toolName: typeof o.tool_name === "string" ? o.tool_name : undefined,
     command: typeof toolInput.command === "string" ? toolInput.command : undefined,
     isInterrupt: typeof o.is_interrupt === "boolean" ? o.is_interrupt : undefined,
+    toolUseId: typeof o.tool_use_id === "string" ? o.tool_use_id : undefined,
     durationMs: typeof o.duration_ms === "number" ? o.duration_ms : undefined,
   };
 }
 
 /**
- * Read and parse the hook payload from stdin. Returns null for a manual
- * invocation (TTY, empty, or unparseable) so the CLI can fall back to argv.
- * Times out rather than hanging if stdin never closes.
+ * Tie the CLI outcome flag to the lifecycle event that actually fired.
+ * Arguments are installation details; the event is the observed evidence.
  */
-export async function readHookInput(timeoutMs = 2000): Promise<HookPayload | null> {
-  if (process.stdin.isTTY) return null;
+export function isExpectedBashOutcome(payload: HookPayload, succeeded: boolean): boolean {
+  return (
+    payload.toolName === "Bash" &&
+    payload.event === (succeeded ? "PostToolUse" : "PostToolUseFailure")
+  );
+}
+/**
+ * Hook stdin is attacker-controlled. Bound it before concatenation/JSON parsing
+ * so a malformed lifecycle event cannot consume unbounded process memory.
+ */
+export const MAX_HOOK_INPUT_BYTES = 256 * 1024;
+
+export type HookInputRead =
+  | { status: "payload"; payload: HookPayload }
+  | { status: "empty" }
+  | { status: "rejected"; reason: "too-large" | "invalid-json" | "timeout" | "stream-error" };
+
+/**
+ * Read and parse hook stdin. TTY/empty input means a manual invocation.
+ * Malformed, timed-out, or oversized input is explicitly rejected so hook
+ * callers never fall back to the `manual` session and mutate the wrong state.
+ */
+type HookInputStream = NodeJS.ReadableStream & { isTTY?: boolean };
+
+export async function readHookInput(
+  timeoutMs = 2000,
+  maxBytes = MAX_HOOK_INPUT_BYTES,
+  input: HookInputStream = process.stdin,
+): Promise<HookInputRead> {
+  if (input.isTTY) return { status: "empty" };
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
     let done = false;
-    const finish = (val: HookPayload | null): void => {
+    const finish = (val: HookInputRead): void => {
       if (done) return;
       done = true;
+      clearTimeout(timer);
       resolve(val);
     };
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    const timer = setTimeout(
+      () => finish({ status: "rejected", reason: "timeout" }),
+      timeoutMs,
+    );
     timer.unref();
 
-    process.stdin.on("data", (c) => chunks.push(Buffer.from(c)));
-    process.stdin.on("end", () => {
-      clearTimeout(timer);
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
-      if (!raw) return finish(null);
+    input.on("data", (chunk: Buffer | string) => {
+      if (done) return;
+      const buffer = Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > maxBytes) {
+        chunks.length = 0;
+        finish({ status: "rejected", reason: "too-large" });
+        return;
+      }
+      chunks.push(buffer);
+    });
+    input.on("end", () => {
+      if (done) return;
+      const raw = Buffer.concat(chunks, totalBytes).toString("utf8").trim();
+      if (!raw) return finish({ status: "empty" });
       try {
-        finish(sanitize(JSON.parse(raw)));
+        finish({ status: "payload", payload: sanitize(JSON.parse(raw)) });
       } catch {
-        finish(null);
+        finish({ status: "rejected", reason: "invalid-json" });
       }
     });
-    process.stdin.on("error", () => finish(null));
+    input.on("error", () =>
+      finish({ status: "rejected", reason: "stream-error" }),
+    );
   });
 }
 

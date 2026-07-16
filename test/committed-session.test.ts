@@ -72,7 +72,7 @@ describe("committed-during-session changes (acceptance #1)", () => {
 
     const res = await runReport(dir, SID);
     expect(res.status).toBe("reported");
-    expect(res.oneLine).toContain("Session: 3 files touched");
+    expect(res.oneLine).toContain("Session: 3 files differ from baseline");
     for (const f of ["a.txt", "b.txt", "c.txt"]) {
       expect(res.markdown).toContain(f);
     }
@@ -87,6 +87,19 @@ describe("committed-during-session changes (acceptance #1)", () => {
     expect(res.status).toBe("reported");
     expect(res.markdown).toContain("new.txt");
     expect(res.markdown).toContain("`new.txt` — added");
+  });
+
+  it("lets a committed protected path override ignorePaths", async () => {
+    await writeBaseline(dir, SID);
+    const ignoredDir = join(dir, "dist");
+    mkdirSync(ignoredDir);
+    writeFileSync(join(ignoredDir, "signing.pem"), "secret material\n");
+    commit("add ignored-but-protected path");
+
+    const res = await runReport(dir, SID);
+    expect(res.status).toBe("reported");
+    expect(res.markdown).toContain("dist/signing.pem");
+    expect(res.markdown).toContain("Protected paths changed");
   });
 
   it("reports a file deleted and committed during the session", async () => {
@@ -120,19 +133,20 @@ describe("pre-existing dirtiness is excluded (acceptance #2)", () => {
     expect(res.markdown).toContain("a.txt");
   });
 
-  it("treats a dirty-before file committed unchanged during the session as no content change", async () => {
+  it("surfaces history movement when dirty-before content is committed unchanged", async () => {
     writeFileSync(join(dir, "a.txt"), "dirty-before\n");
     await writeBaseline(dir, SID);
     commit("commit the pre-existing dirt"); // content unchanged, just committed
 
     const res = await runReport(dir, SID);
-    // content is identical to session start -> not a session change
-    expect(res.status).toBe("no-changes");
+    expect(res.status).toBe("reported");
+    expect(res.oneLine).toContain("Session: no files differ from baseline");
+    expect(res.oneLine).toContain("history moved");
   });
 });
 
 describe("no-commit repositories (first commit during session)", () => {
-  it("does not report untracked-at-baseline files whose content is unchanged by the initial commit", async () => {
+  it("surfaces the first commit even when baseline file content is unchanged", async () => {
     const fresh = mkdtempSync(join(tmpdir(), "tb-fresh-"));
     try {
       execFileSync("git", ["init"], { cwd: fresh, stdio: "pipe" });
@@ -147,7 +161,9 @@ describe("no-commit repositories (first commit during session)", () => {
       });
 
       const res = await runReport(fresh, SID);
-      expect(res.status).toBe("no-changes");
+      expect(res.status).toBe("reported");
+      expect(res.oneLine).toContain("Session: no files differ from baseline");
+      expect(res.oneLine).toContain("history moved");
     } finally {
       cleanupFixture(fresh, "strict");
     }
@@ -167,7 +183,7 @@ describe("large commits stay within the hook budget", () => {
     const elapsed = Date.now() - t0;
 
     expect(res.status).toBe("reported");
-    expect(res.oneLine).toContain("Session: 300 files touched");
+    expect(res.oneLine).toContain("Session: 300 files differ from baseline");
     // Pre-fix this took >5s (one git spawn per path) and the hook watchdog
     // killed it silently. Batched, it comfortably fits the budget. This
     // assertion times ONLY runReport — it is the actual guard.

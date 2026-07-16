@@ -20,12 +20,12 @@
 
 ---
 
-TechyBara runs after each Claude Code response and reports what really happened on
-disk. It reads reality from **git and the filesystem** — it never takes the agent's
-word for what it did — and tells you which files changed *during this session*, not
+TechyBara runs after each Claude Code response and records end-state evidence from
+**git and the filesystem** — it never takes the agent's prose as evidence — and
+tells you which files differ from the session baseline, not
 just what was already dirty when the session began. It makes no network calls at
-runtime, never shows file contents, and never blocks your session. When a turn
-changes nothing, it stays quiet.
+runtime, never shows file contents, and never blocks your session. Complete,
+unchanged turns stay quiet unless a failed or ambiguous verification needs attention.
 
 ## The problem
 
@@ -43,7 +43,7 @@ change. TechyBara watches those paths directly.
 After a turn that changed files, you'll see a single line:
 
 ```text
-🦫 Turn: 3 files changed (1 added, 2 modified) · Session: 7 files touched · ✓ test · ⚠️ protected: .env
+🦫 Turn: 3 files changed (1 added, 2 modified) · Session: 7 files differ from baseline · ✓ test · ⚠️ protected: .env
 ```
 
 Every count is **distinct files** — never edits, hunks, or lines:
@@ -109,8 +109,8 @@ Preview every change without writing anything:
 npx techybara init --dry-run
 ```
 
-Then use Claude Code as usual. Turns that change files get a one-line summary;
-turns that change nothing stay silent.
+Then use Claude Code as usual. Turns with new evidence get a one-line summary;
+complete unchanged turns with no failed/ambiguous verification stay silent.
 
 ## Commands
 
@@ -142,7 +142,7 @@ repeat-suppression fingerprint, so it cannot silence the next automatic banner.
 | **Gitignored protected files** (e.g. `.env`) added / changed / deleted | ✅ |
 | Non-protected gitignored files | ❌ by design |
 | Paths matching your `ignorePaths` config | ❌ by design (unless also protected — protected wins) |
-| Protected file larger than **64 MB** | ⚠️ compared by size only, and the report says so |
+| Protected file larger than **64 MB** | ⚠️ compared by size+mtime; report is marked partial |
 | Change made and **reverted** within a single turn | ❌ (end-state comparison; see below) |
 | Whether a change was made by Claude vs. you vs. your IDE | ❌ not distinguishable |
 | **That a test/lint/build command ran, and how it exited** | ✅ observed from the tool result |
@@ -210,12 +210,13 @@ Being clear about the edges is part of the tool.
   even when tests fail, so TechyBara records `unknown` rather than a pass.
   Anything that can decouple a command's exit status from its real result — a
   pipe, a `;`, backgrounding, `$(…)`, `if` — gets the same treatment. `&&` and
-  redirection (`>`, `2>&1`) are exempt, because they provably preserve the exit
-  status. [docs/shells.md](docs/shells.md) lists every rule and its evidence.
+  redirection (`>`, `2>&1`) are exempt for successful tool calls. A failed
+  composite command is also `unknown`, because another stage may have failed.
+  [docs/shells.md](docs/shells.md) lists every rule and its evidence.
 - **It only understands POSIX shell syntax**, which is safe because it only ever
   reads Claude Code's `Bash` tool. It does not analyse `cmd.exe` or PowerShell as
-  source shells; a payload it can't confirm came from Bash yields `unknown`, not
-  a guess.
+  source shells; a payload whose tool and lifecycle event cannot be confirmed is
+  rejected without a receipt.
 - **It doesn't show line-level diffs.** It reports *which* files changed and which
   are protected. Use `git diff` for line detail.
 - **It is not a defense against an adversarial agent.** TechyBara is observe-only; an
@@ -232,6 +233,14 @@ Being clear about the edges is part of the tool.
   fixed number of entries so it can't stall a hook on a pathological tree. If a repo
   is large enough to hit that limit, the turn is reported as **partial verification**
   — a visible ⚠️, never silent.
+- **State and hook inputs are bounded.** Hook payloads stop at 256 KiB; a session
+  retains at most 10,000 receipt files (4 KiB each); the error log stops at 64 KiB;
+  state JSON stops at 8 MiB; and stored Markdown stops at 1 MiB. If a receipt or
+  report cap affects evidence, the report is visibly marked partial.
+- **Linked state paths are refused.** TechyBara rejects a symlink/junction at
+  `.techybara` or inside the state path before reading or writing it. This is
+  best-effort hardening, not a security boundary: a process that can concurrently
+  rewrite the repository can still race filesystem checks.
 - **Partial verification is always visible.** Timeouts, internal errors, a
   lost/rebuilt baseline, an unusable git, and an incomplete scan all produce a ⚠️
   message rather than silence. Silence is only ever emitted after a complete
@@ -277,11 +286,12 @@ Everything TechyBara persists, and nothing else:
 | Path | Contents |
 | --- | --- |
 | `config.json` | Your configuration. |
-| `error.log` | Timestamped internal errors, so a failure is never silent. |
+| `error.log` | Bounded timestamped internal errors, so a failure is never silent. |
 | `sessions/<id>/baseline.json` | Per-path git status codes and **blob hashes** as of session start. Hashes, never bytes. |
 | `sessions/<id>/checkpoint.json` | The same shape, as of the end of the last turn, plus a turn counter. |
-| `sessions/<id>/receipts/*.json` | One per observed verification: `{version, category, outcome, at, durationMs?, reason?}`. `reason` is a closed enum (e.g. `piped-exit-status`). No command, no output. |
-| `sessions/<id>/report.md` | The rendered human report — paths and change kinds. |
+| `sessions/<id>/receipts/*.json` | One per observed verification, keyed by tool-use id when available: `{version, category, outcome, at, durationMs?, reason?}`. No command, no output. |
+| `sessions/<id>/receipts-truncated` | Sticky marker that receipt retention hit its cap; later reports remain visibly partial. |
+| `sessions/<id>/report.md` | The bounded rendered human report — paths and change kinds. |
 | `sessions/<id>/last-reported.json` | A single hash used to suppress repeat banners. |
 
 The dogfood harness sweeps this whole directory for secret values, command text,
@@ -319,14 +329,15 @@ out of the box:
 - **`protectedPaths`** — globs surfaced loudly and hashed directly, *even when
   gitignored* (this is how a `.env` change is caught). Protected files are exempt
   from `maxFileSizeMB` and are hashed up to a hard **64 MB** ceiling; beyond that they
-  are compared by size only, and the report says so.
+  are compared by size+mtime and the report is marked partial.
 - **`ignorePaths`** — globs excluded from reports entirely. If a path matches both
   lists, **protected wins** — it is still checked and flagged.
 - **`maxFiles`** — above this many changed files, TechyBara degrades to a
   status-only summary instead of hashing everything (keeps hooks fast on huge trees).
   Degraded turns are marked *Partial* — never silent.
 - **`maxFileSizeMB`** — non-protected files larger than this are noted as changed
-  without hashing.
+  using size+mtime instead of a content hash. This is partial evidence and is
+  reported as such.
 
 Globs support `*` (within a path segment), `**` (across segments), and `?`.
 
@@ -348,7 +359,7 @@ Claude Code turn ──► Bash tool call
     │                    classify the command, keep only the category
     │                             │
     │                             ▼
-    │                    .techybara/sessions/<id>/receipts/<uuid>.json
+    │                    .techybara/sessions/<id>/receipts/<tool-use-id-or-uuid>.json
     ▼
 Stop hook
     │
@@ -369,8 +380,9 @@ Advance checkpoint.json  (only after the turn is fully processed)
 The baseline records a content hash for every file that differs from `HEAD` at the
 start of the session, plus a direct hash of every protected-glob match — including
 gitignored ones. At each turn's end TechyBara re-captures **once** and compares it
-against both the previous turn's checkpoint and the session baseline, **by
-content** — so reverts and re-edits fall out of a single comparison.
+against both the previous turn's checkpoint and the session baseline, using
+content hashes when within the configured budget. Metadata-only or status-only
+comparisons are explicitly marked partial.
 
 If commits happened during the session, TechyBara also diffs the baseline commit
 against the current one, so changes that were committed — and therefore no longer
@@ -380,7 +392,7 @@ suppresses identical repeat reports, so you only hear about *new* changes; a par
 or degraded state, or a turn whose verification failed, is never suppressed into
 silence.
 
-**Why verification is trustworthy.** Claude Code fires `PostToolUse` *only* after
+**Why verification is harness-observed.** Claude Code fires `PostToolUse` *only* after
 a tool call succeeds, and `PostToolUseFailure` *only* after one fails. So the
 outcome is decided by which event fired — TechyBara never parses output, and
 never takes Claude's word for it. That's also why it can afford to ignore stdout

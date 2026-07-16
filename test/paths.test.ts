@@ -20,4 +20,13 @@ describe("safeSessionId", () => {
     const dir = sessionDir("C:/repo", "..");
     expect(dir).toBe(join("C:/repo", ".techybara", "sessions", "unknown"));
   });
+  it("bounds long ids without collapsing distinct shared prefixes", () => {
+    const prefix = "a".repeat(500);
+    const first = safeSessionId(prefix + "x");
+    const second = safeSessionId(prefix + "y");
+    expect(first.length).toBeLessThanOrEqual(128);
+    expect(second.length).toBeLessThanOrEqual(128);
+    expect(first).not.toBe(second);
+    expect(safeSessionId(prefix + "x")).toBe(first);
+  });
 });

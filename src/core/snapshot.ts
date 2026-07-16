@@ -1,17 +1,24 @@
 // Snapshot engine: capture the working-tree state (relative to HEAD) as content
 // hashes, so a later capture can be diffed to find what changed *during* a
 // session — not merely what is dirty vs HEAD.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
-import { writeFileAtomic } from "./fsutil.js";
-import { getHead, getPorcelain, getToplevel, hashObjects } from "./git.js";
+import {
+  acquireLock,
+  assertSafeStatePath,
+  ensureSafeStateDirectory,
+  writeStateFileAtomic,
+} from "./fsutil.js";
+import { getHead, getPorcelain, getToplevel, hashObjects, resolveSubmoduleState } from "./git.js";
 import { compileGlobs } from "./glob.js";
 import { findProtectedFiles } from "./protected.js";
-import { baselinePath, sessionDir, sessionsDir } from "./paths.js";
+import { baselinePath, safeSessionId, sessionDir, sessionLockPath, sessionsDir } from "./paths.js";
 import { SNAPSHOT_VERSION, type Snapshot, type SnapshotEntry } from "./types.js";
 
 const KEEP_SESSIONS = 20;
+/** Absolute safety ceiling for hashing a protected file. */
+const PROTECTED_HASH_CAP_BYTES = 64 * 1024 * 1024;
 
 /** Optional knobs for a capture. `maxProtectedWalkEntries` overrides the walk's
  * safety cap and exists so tests can force truncation without 50k real files. */
@@ -41,27 +48,88 @@ export async function captureSnapshot(
   // honor the user's configured ignorePaths (protected paths are handled by a
   // separate walk below and win over ignore rules).
   const isIgnored = compileGlobs(config.ignorePaths);
-  const visible = porcelain.filter((e) => !isStatePath(e.path) && !isIgnored(e.path));
+  const isProtected = compileGlobs(config.protectedPaths);
+  const visible = porcelain.filter(
+    (e) => !isStatePath(e.path) && (!isIgnored(e.path) || isProtected(e.path)),
+  );
 
   if (visible.length > config.maxFiles) {
     // Too many changes to hash within budget: record paths + status only.
     degraded = true;
     note = `${visible.length} changed files exceeds maxFiles (${config.maxFiles}); status-only.`;
     for (const e of visible) {
-      entries[e.path] = { xy: e.xy, hash: null };
+      entries[e.path] = { xy: e.xy, hash: null, ...(e.mode ? { mode: e.mode } : {}) };
     }
   } else {
     const toHash: string[] = [];
+    const submodulePaths: string[] = [];
+    const metadataByPath = new Map<string, FileMetadata>();
+    let metadataCompared = 0;
     for (const e of visible) {
-      entries[e.path] = { xy: e.xy, hash: null };
+      entries[e.path] = { xy: e.xy, hash: null, ...(e.mode ? { mode: e.mode } : {}) };
       if (e.deleted) continue;
-      if (fileSizeAtMost(join(top, e.path), maxBytes)) toHash.push(e.path);
-      // Oversized/vanished files keep hash: null (compared by presence/status).
+      // A gitlink's content is a commit pointer, not a blob: hash-object would
+      // be meaningless (or error) against a directory. Resolve it separately.
+      if (e.sub?.startsWith("S")) {
+        submodulePaths.push(e.path);
+        continue;
+      }
+      const metadata = fileMetadata(join(top, e.path));
+      if (!metadata) {
+        if (!isProtected(e.path)) metadataCompared++;
+        continue;
+      }
+      metadataByPath.set(e.path, metadata);
+      // Untracked files carry no porcelain mode; backfill from the filesystem
+      // so this entry compares consistently once the same path is committed.
+      if (!e.mode) entries[e.path]!.mode = metadata.execMode;
+      const hashCap = isProtected(e.path) ? PROTECTED_HASH_CAP_BYTES : maxBytes;
+      if (metadata.size <= hashCap) {
+        toHash.push(e.path);
+      } else if (!isProtected(e.path)) {
+        entries[e.path]!.hash = metadataSignature(metadata);
+        metadataCompared++;
+      }
     }
     const hashes = await hashObjects(top, toHash);
-    for (const [path, sha] of hashes) {
+    for (const path of toHash) {
       const existing = entries[path];
-      if (existing) existing.hash = sha;
+      if (!existing) continue;
+      const sha = hashes.get(path);
+      if (sha !== undefined) {
+        existing.hash = sha;
+      } else if (!isProtected(path)) {
+        const metadata = metadataByPath.get(path);
+        if (metadata) existing.hash = metadataSignature(metadata);
+        metadataCompared++;
+      }
+    }
+    if (submodulePaths.length > 0) {
+      const byPath = new Map(visible.map((e) => [e.path, e]));
+      const states = await Promise.all(
+        submodulePaths.map((p) => resolveSubmoduleState(top, p)),
+      );
+      let submoduleUnresolved = 0;
+      submodulePaths.forEach((p, i) => {
+        const state = states[i]!;
+        const sub = byPath.get(p)!.sub!;
+        const existing = entries[p]!;
+        existing.submodule = { sub, commit: state.commit, dirtySig: state.dirtySig };
+        // Both null means resolution failed outright (e.g. uninitialized) —
+        // the sub-state flags are still recorded, but a further edit inside
+        // that unresolved submodule cannot be detected. Say so, don't hide it.
+        if (state.commit === null && state.dirtySig === null) submoduleUnresolved++;
+      });
+      if (submoduleUnresolved > 0) {
+        degraded = true;
+        const msg = `${submoduleUnresolved} submodule(s) could not be inspected; only their outer status flags are tracked.`;
+        note = note ? `${note} ${msg}` : msg;
+      }
+    }
+    if (metadataCompared > 0) {
+      degraded = true;
+      const msg = `${metadataCompared} file(s) could not be content-hashed; comparison uses size+mtime or status only.`;
+      note = note ? `${note} ${msg}` : msg;
     }
   }
 
@@ -71,6 +139,7 @@ export async function captureSnapshot(
   if (protectedResult.note) {
     note = note ? `${note} ${protectedResult.note}` : protectedResult.note;
   }
+  if (protectedResult.partial) degraded = true;
   if (protectedResult.truncated) {
     // The protected-path walk hit its safety cap before finishing, so some
     // protected files may not have been inspected. Mark the whole capture
@@ -89,21 +158,36 @@ function isStatePath(path: string): boolean {
   return path === ".techybara" || path.startsWith(".techybara/");
 }
 
-function fileSizeAtMost(abs: string, maxBytes: number): boolean {
+interface FileMetadata {
+  size: number;
+  mtimeMs: number;
+  /**
+   * Git-shaped mode ("100644"/"100755") derived from the filesystem's
+   * executable bit. Only used to fill in `mode` for paths git itself gave no
+   * mode for — untracked files and gitignored protected files. Without this,
+   * such a path's mode-less snapshot entry compares unequal to the SAME
+   * unchanged file once committed (ls-tree always reports a mode), producing
+   * a false "modified" the instant a fresh untracked file gets committed.
+   */
+  execMode: string;
+}
+
+function fileMetadata(abs: string): FileMetadata | null {
   try {
-    return statSync(abs).size <= maxBytes;
+    const stat = statSync(abs);
+    return {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      execMode: (stat.mode & 0o111) !== 0 ? "100755" : "100644",
+    };
   } catch {
-    return false; // vanished/unreadable
+    return null;
   }
 }
 
-/**
- * Hard ceiling for hashing protected files. Protected paths are exempt from the
- * configurable maxFileSizeMB cap — a changed secret must never be silently
- * skipped for being big — but an absolute bound keeps a pathological file from
- * stalling the hook. Beyond it, a size signature still catches add/delete/grow.
- */
-const PROTECTED_HASH_CAP_BYTES = 64 * 1024 * 1024;
+function metadataSignature(metadata: FileMetadata): string {
+  return `metadata:${metadata.size}:${Math.trunc(metadata.mtimeMs)}`;
+}
 
 /**
  * Ensure every protected working-tree file has a content signature in `entries`,
@@ -116,29 +200,28 @@ async function mergeProtectedFiles(
   config: TechyBaraConfig,
   entries: Record<string, SnapshotEntry>,
   maxWalkEntries?: number,
-): Promise<{ note?: string; truncated: boolean }> {
+): Promise<{ note?: string; truncated: boolean; partial: boolean }> {
   const { paths, truncated } = findProtectedFiles(top, config.protectedPaths, maxWalkEntries);
   const toHash: string[] = [];
-  let note: string | undefined;
+  let metadataCompared = 0;
+  const metadataByPath = new Map<string, FileMetadata>();
 
   for (const p of paths) {
     const existing = entries[p];
     if (existing && existing.hash !== null) continue; // already hashed via git status
-    let size: number;
-    try {
-      size = statSync(join(top, p)).size;
-    } catch {
-      continue; // vanished between walk and stat
+    const metadata = fileMetadata(join(top, p));
+    if (!metadata) {
+      metadataCompared++;
+      continue;
     }
-    if (size <= PROTECTED_HASH_CAP_BYTES) {
+    metadataByPath.set(p, metadata);
+    if (metadata.size <= PROTECTED_HASH_CAP_BYTES) {
       toHash.push(p);
     } else {
-      // Too large to hash: record a size signature so its presence and growth
-      // are still compared, and say so rather than silently degrading coverage.
-      const sig = `oversize:${size}`;
+      const sig = metadataSignature(metadata);
       if (existing) existing.hash = sig;
-      else entries[p] = { xy: "!!", hash: sig };
-      note = `protected file ${p} exceeds the ${PROTECTED_HASH_CAP_BYTES / 1024 / 1024}MB hashing cap; compared by size only.`;
+      else entries[p] = { xy: "!!", hash: sig, mode: metadata.execMode };
+      metadataCompared++;
     }
   }
 
@@ -146,13 +229,25 @@ async function mergeProtectedFiles(
     const hashes = await hashObjects(top, toHash);
     for (const p of toHash) {
       const sha = hashes.get(p);
-      if (sha === undefined) continue;
+      if (sha === undefined) {
+        const metadata = metadataByPath.get(p);
+        const existing = entries[p];
+        if (metadata && existing) existing.hash = metadataSignature(metadata);
+        else if (metadata) entries[p] = { xy: "!!", hash: metadataSignature(metadata), mode: metadata.execMode };
+        metadataCompared++;
+        continue;
+      }
       const existing = entries[p];
       if (existing) existing.hash = sha;
-      else entries[p] = { xy: "!!", hash: sha }; // "!!" = protected, tracking state unknown
+      // "!!" = protected, tracking state unknown
+      else entries[p] = { xy: "!!", hash: sha, mode: metadataByPath.get(p)?.execMode };
     }
   }
-  return { note, truncated };
+  const note =
+    metadataCompared > 0
+      ? `${metadataCompared} protected file(s) could not be content-hashed; comparison uses size+mtime or status only.`
+      : undefined;
+  return { note, truncated, partial: metadataCompared > 0 };
 }
 
 function snapshotOf(
@@ -192,18 +287,35 @@ export async function writeBaseline(
 ): Promise<SnapshotOutcome> {
   const top = await getToplevel(cwd);
   if (!top) return { status: "not-a-repo" };
+  sessionId = safeSessionId(sessionId);
 
+  const dir = sessionDir(top, sessionId);
   const bpath = baselinePath(top, sessionId);
+  assertSafeStatePath(top, dir);
+  assertSafeStatePath(top, bpath);
   if (existsSync(bpath)) {
     return { status: "exists", top };
   }
 
-  const config = configOverride ?? loadConfig(top);
-  const snapshot = await captureSnapshot(top, sessionId, config);
-  mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  writeFileAtomic(bpath, JSON.stringify(snapshot, null, 2) + "\n");
-  pruneOldSessions(top);
-  return { status: "written", top, snapshot };
+  // Duplicate SessionStart hooks race the exists-check above; the session lock
+  // serializes them so exactly one process captures and writes. A held lock
+  // means another live process is establishing the baseline right now —
+  // reporting "exists" (kept) is the honest summary of that.
+  ensureSafeStateDirectory(top, dir);
+  const lockPath = sessionLockPath(top, sessionId);
+  assertSafeStatePath(top, lockPath);
+  const release = acquireLock(lockPath);
+  if (!release) return { status: "exists", top };
+  try {
+    if (existsSync(bpath)) return { status: "exists", top };
+    const config = configOverride ?? loadConfig(top);
+    const snapshot = await captureSnapshot(top, sessionId, config);
+    writeStateFileAtomic(top, bpath, JSON.stringify(snapshot, null, 2) + "\n");
+    pruneOldSessions(top);
+    return { status: "written", top, snapshot };
+  } finally {
+    release();
+  }
 }
 
 /** Read a baseline snapshot from disk, or null if missing/corrupt/wrong version. */
@@ -224,6 +336,7 @@ function pruneOldSessions(top: string): void {
   const dir = sessionsDir(top);
   let names: string[];
   try {
+    assertSafeStatePath(top, dir);
     names = readdirSync(dir);
   } catch {
     return;
@@ -232,7 +345,10 @@ function pruneOldSessions(top: string): void {
     .map((name) => {
       const full = join(dir, name);
       try {
-        return { full, mtime: statSync(full).mtimeMs };
+        assertSafeStatePath(top, full);
+        const stat = statSync(full);
+        if (!stat.isDirectory()) return null;
+        return { full, mtime: stat.mtimeMs };
       } catch {
         return null;
       }
@@ -242,6 +358,7 @@ function pruneOldSessions(top: string): void {
 
   for (const stale of dirs.slice(KEEP_SESSIONS)) {
     try {
+      assertSafeStatePath(top, stale.full);
       rmSync(stale.full, { recursive: true, force: true });
     } catch {
       // best-effort cleanup

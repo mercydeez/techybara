@@ -7,12 +7,14 @@ import {
   decideOutcome,
   writeReceipt,
   readReceipts,
-  receiptsSince,
+  unclaimedReceipts,
   summarize,
   hasUnverified,
   type Receipt,
+  type StoredReceipt,
 } from "../src/report/receipt.js";
 import { receiptsDir } from "../src/core/paths.js";
+import { isExpectedBashOutcome } from "../src/hooks/adapter.js";
 
 describe("classifyCommand", () => {
   it("returns null for non-verification commands, so no receipt is written", () => {
@@ -21,6 +23,20 @@ describe("classifyCommand", () => {
     expect(classifyCommand("cd src")).toBeNull();
     expect(classifyCommand("git status")).toBeNull();
     expect(classifyCommand("   ")).toBeNull();
+  });
+
+  it("does not classify verification words in output, comments, builtins, or paths", () => {
+    expect(classifyCommand("echo test")).toBeNull();
+    expect(classifyCommand("test -f package.json")).toBeNull();
+    expect(classifyCommand("true # npm test")).toBeNull();
+    expect(classifyCommand('echo "npm test"')).toBeNull();
+    expect(classifyCommand("command -v pytest")).toBeNull();
+    expect(classifyCommand("./scripts/test-data-loader")).toBeNull();
+  });
+
+  it("recognizes explicit runner invocations and package scripts", () => {
+    expect(classifyCommand("./node_modules/.bin/vitest run")?.category).toBe("test");
+    expect(classifyCommand("npm run test:unit")?.category).toBe("test");
   });
 
   it("classifies each verification category", () => {
@@ -38,11 +54,18 @@ describe("classifyCommand", () => {
   // The whole point of the masking guard: a tool call can succeed while the
   // verification it ran actually failed. Never record success in that case.
   describe("exit-status masking", () => {
-    it("allows && because it short-circuits and propagates failure", () => {
+    it("allows a successful && chain but treats a failed chain as ambiguous", () => {
       expect(classifyCommand("cd app && npm test")?.maskedBy).toBeNull();
       expect(classifyCommand("npm ci && npm test && npm run lint")?.maskedBy).toBeNull();
+      expect(classifyCommand("false && npm test")?.failureMaskedBy).toBe(
+        "masked-exit-status",
+      );
     });
 
+    it("flags negation because it inverts the verification result", () => {
+
+      expect(classifyCommand("! npm test")?.maskedBy).toBe("masked-exit-status");
+    });
     it("flags || which swallows a failing exit status", () => {
       expect(classifyCommand("npm test || true")?.maskedBy).toBe("masked-exit-status");
       expect(classifyCommand("npm test || echo failed")?.maskedBy).toBe("masked-exit-status");
@@ -131,9 +154,9 @@ describe("receipt storage", () => {
     expect(readReceipts(dir, "s1")[0]?.outcome).toBe("unknown");
   });
 
-  it("trusts a failure even when masked (masking only flatters, never worsens)", () => {
+  it("records unknown when a composite command fails outside the classified check", () => {
     writeReceipt(dir, "s1", { category: "test", maskedBy: "masked-exit-status" }, { succeeded: false });
-    expect(readReceipts(dir, "s1")[0]?.outcome).toBe("fail");
+    expect(readReceipts(dir, "s1")[0]?.outcome).toBe("unknown");
   });
 
   // Claude Code reports an interrupt via PostToolUseFailure with is_interrupt.
@@ -198,6 +221,34 @@ describe("receipt storage", () => {
     expect(readReceipts(dir, "s1")).toHaveLength(20);
   });
 
+  it("collapses re-delivered events for the same tool call to one receipt", () => {
+    const obs = { succeeded: true, toolUseId: "toolu_abc123" };
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, obs);
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, obs);
+    expect(readReceipts(dir, "s1")).toHaveLength(1);
+  });
+
+  it("keeps both receipts if success AND failure ever fire for one call", () => {
+    // Should be impossible per the protocol, but if it happens the honest
+    // answer is both receipts, letting worst-outcome-wins report the failure.
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: true, toolUseId: "toolu_x" });
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: false, toolUseId: "toolu_x" });
+    const receipts = readReceipts(dir, "s1");
+    expect(receipts).toHaveLength(2);
+    expect(summarize(receipts)[0]?.outcome).toBe("fail");
+  });
+
+  it("distinct tool calls never collide, and hostile ids stay inside the receipts dir", () => {
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: true, toolUseId: "toolu_1" });
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: true, toolUseId: "toolu_2" });
+    writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: true, toolUseId: "../../escape" });
+    expect(readReceipts(dir, "s1")).toHaveLength(3);
+    for (const name of readdirSync(receiptsDir(dir, "s1"))) {
+      expect(name).not.toContain("/");
+      expect(name).not.toContain("\\");
+    }
+  });
+
   it("skips a half-written temp file left by a killed hook", () => {
     writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: true });
     writeFileSync(join(receiptsDir(dir, "s1"), "abc.json.tmp-123-456"), "{ truncated");
@@ -212,6 +263,49 @@ describe("receipt storage", () => {
     writeFileSync(join(d, "wrong.json"), JSON.stringify({ version: 1, category: "test", outcome: "bogus", at: "x" }));
     writeReceipt(dir, "s1", { category: "test", maskedBy: null }, { succeeded: true });
     expect(readReceipts(dir, "s1")).toHaveLength(1);
+  });
+
+  it("rejects invalid categories and timestamps from on-disk receipts", () => {
+    const d = receiptsDir(dir, "s1");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, "category.json"),
+      JSON.stringify({ version: 1, category: "deploy", outcome: "success", at: "2026-01-01T00:00:00Z" }),
+    );
+    writeFileSync(
+      join(d, "date.json"),
+      JSON.stringify({ version: 1, category: "test", outcome: "success", at: "not-a-date" }),
+    );
+    expect(readReceipts(dir, "s1")).toEqual([]);
+  });
+
+  it("sanitizes duration and reason fields from on-disk receipts", () => {
+    const d = receiptsDir(dir, "s1");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, "fields.json"),
+      JSON.stringify({
+        version: 1,
+        category: "test",
+        outcome: "success",
+        at: "2026-01-01T00:00:00Z",
+        durationMs: -1,
+        reason: "interrupted",
+      }),
+    );
+    expect(readReceipts(dir, "s1")[0]).not.toHaveProperty("durationMs");
+    expect(readReceipts(dir, "s1")[0]).not.toHaveProperty("reason");
+  });
+});
+
+describe("hook outcome validation", () => {
+  it("requires Bash and an event that agrees with the CLI outcome flag", () => {
+    expect(isExpectedBashOutcome({ toolName: "Bash", event: "PostToolUse" }, true)).toBe(true);
+    expect(isExpectedBashOutcome({ toolName: "Bash", event: "PostToolUseFailure" }, false)).toBe(true);
+    expect(isExpectedBashOutcome({ toolName: "Bash", event: "PostToolUseFailure" }, true)).toBe(false);
+    expect(isExpectedBashOutcome({ toolName: "Bash", event: "PostToolUse" }, false)).toBe(false);
+    expect(isExpectedBashOutcome({ toolName: "PowerShell", event: "PostToolUse" }, true)).toBe(false);
+    expect(isExpectedBashOutcome({ toolName: "Bash" }, true)).toBe(false);
   });
 });
 
@@ -371,22 +465,24 @@ describe("unknown reasons", () => {
 });
 
 describe("turn attribution and summary", () => {
-  const r = (category: string, outcome: string, at: string): Receipt =>
-    ({ version: 1, category, outcome, at }) as Receipt;
+  const r = (category: string, outcome: string, at: string, id = category): StoredReceipt =>
+    ({ version: 1, category, outcome, at, id }) as StoredReceipt;
 
-  it("buckets receipts by the checkpoint boundary", () => {
+  it("buckets receipts by claim membership, not timestamps", () => {
     const all = [
-      r("test", "success", "2026-01-01T00:00:00.000Z"),
-      r("lint", "fail", "2026-01-01T00:05:00.000Z"),
+      // The unclaimed receipt is deliberately OLDER than the claimed one: a
+      // delayed hook process (or a stepped clock) must not hide it.
+      r("test", "success", "2026-01-01T00:00:00.000Z", "late-arrival"),
+      r("lint", "fail", "2026-01-01T00:05:00.000Z", "already-claimed"),
     ];
-    const turn = receiptsSince(all, "2026-01-01T00:01:00.000Z");
+    const turn = unclaimedReceipts(all, ["already-claimed"]);
     expect(turn).toHaveLength(1);
-    expect(turn[0]?.category).toBe("lint");
+    expect(turn[0]?.category).toBe("test");
   });
 
   it("treats every receipt as this turn's when there is no checkpoint yet", () => {
     const all = [r("test", "success", "2026-01-01T00:00:00.000Z")];
-    expect(receiptsSince(all, null)).toHaveLength(1);
+    expect(unclaimedReceipts(all, [])).toHaveLength(1);
   });
 
   it("collapses a category to its worst outcome, regardless of order", () => {

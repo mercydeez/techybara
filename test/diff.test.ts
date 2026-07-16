@@ -3,8 +3,15 @@ import { computeDelta, deltaFingerprint } from "../src/core/diff.js";
 import { renderOneLine, renderMarkdown } from "../src/report/render.js";
 import type { Snapshot, SnapshotEntry } from "../src/core/types.js";
 
-function e(hash: string | null, xy: string): SnapshotEntry {
-  return { hash, xy };
+function e(hash: string | null, xy: string, mode?: string): SnapshotEntry {
+  return { hash, xy, ...(mode ? { mode } : {}) };
+}
+
+function sub(
+  xy: string,
+  state: { sub: string; commit: string | null; dirtySig: string | null },
+): SnapshotEntry {
+  return { hash: null, xy, submodule: state };
 }
 
 function snap(
@@ -80,7 +87,7 @@ describe("computeDelta", () => {
   it("propagates degraded status", () => {
     const d = computeDelta(snap({}), snap({ "a.txt": e(null, "??") }, { degraded: true }));
     expect(d.degraded).toBe(true);
-    expect(d.notes.some((n) => /status-only/.test(n))).toBe(true);
+    expect(d.notes.some((n) => /partial/.test(n))).toBe(true);
   });
 
   it("sorts changes by path deterministically", () => {
@@ -89,6 +96,71 @@ describe("computeDelta", () => {
       snap({ "z.txt": e("1", "??"), "a.txt": e("2", "??"), "m.txt": e("3", "??") }),
     );
     expect(d.changes.map((c) => c.path)).toEqual(["a.txt", "m.txt", "z.txt"]);
+  });
+
+  describe("executable-bit fidelity", () => {
+    it("detects a mode-only change (identical content hash, flipped exec bit)", () => {
+      const d = computeDelta(
+        snap({ "run.sh": e("h1", ".M", "100644") }),
+        snap({ "run.sh": e("h1", ".M", "100755") }),
+      );
+      expect(d.modified).toBe(1);
+      expect(d.changes[0]!.path).toBe("run.sh");
+    });
+
+    it("treats matching mode and hash as unchanged", () => {
+      const d = computeDelta(
+        snap({ "run.sh": e("h1", ".M", "100755") }),
+        snap({ "run.sh": e("h1", ".M", "100755") }),
+      );
+      expect(d.changes).toHaveLength(0);
+    });
+
+    it("does not fold in a mode absent from both sides", () => {
+      const d = computeDelta(snap({ "a.txt": e("h1", "??") }), snap({ "a.txt": e("h1", "??") }));
+      expect(d.changes).toHaveLength(0);
+    });
+  });
+
+  describe("gitlink (submodule) fidelity", () => {
+    const st = (over: Partial<{ sub: string; commit: string | null; dirtySig: string | null }> = {}) => ({
+      sub: "N...",
+      commit: "c1",
+      dirtySig: null,
+      ...over,
+    });
+
+    it("detects a committed submodule pointer move", () => {
+      const d = computeDelta(
+        snap({ vendor: sub("A.", st({ commit: "c1" })) }),
+        snap({ vendor: sub("A.", st({ commit: "c2" })) }),
+      );
+      expect(d.changes[0]!.path).toBe("vendor");
+    });
+
+    it("detects a submodule going from clean to dirty", () => {
+      const d = computeDelta(
+        snap({ vendor: sub("N.", st({ sub: "N..." })) }),
+        snap({ vendor: sub(" M", st({ sub: "S.M." })) }),
+      );
+      expect(d.changes).toHaveLength(1);
+    });
+
+    it("detects a second edit inside an already-dirty submodule via its dirtySig, even though sub-flags are unchanged", () => {
+      const d = computeDelta(
+        snap({ vendor: sub(" M", st({ sub: "S.M.", dirtySig: "sig1" })) }),
+        snap({ vendor: sub(" M", st({ sub: "S.M.", dirtySig: "sig2" })) }),
+      );
+      expect(d.changes).toHaveLength(1);
+    });
+
+    it("treats an unchanged submodule state as no change", () => {
+      const d = computeDelta(
+        snap({ vendor: sub(" M", st({ dirtySig: "sig1" })) }),
+        snap({ vendor: sub(" M", st({ dirtySig: "sig1" })) }),
+      );
+      expect(d.changes).toHaveLength(0);
+    });
   });
 });
 
@@ -115,7 +187,7 @@ describe("renderOneLine", () => {
     const line = renderOneLine(d, d)!;
     // Counts name their unit: files, not edits/hunks/lines.
     expect(line).toContain("Turn: 2 files added");
-    expect(line).toContain("Session: 2 files touched");
+    expect(line).toContain("Session: 2 files differ from baseline");
     expect(line).toContain("protected: .env");
   });
 
@@ -124,7 +196,7 @@ describe("renderOneLine", () => {
     const session = computeDelta(snap({}), snap({ "a.txt": e("y", "??"), "b.txt": e("z", "??") }));
     const line = renderOneLine(turn, session)!;
     expect(line).toContain("Turn: no files changed");
-    expect(line).toContain("Session: 2 files touched");
+    expect(line).toContain("Session: 2 files differ from baseline");
   });
 
   it("names a single kind plainly and spells out a mix", () => {
@@ -149,14 +221,20 @@ describe("renderOneLine", () => {
     expect(line).toContain("✗ lint");
   });
 
-  it("stays silent on an unchanged turn even when a command was observed", () => {
-    // The command's own output is already on screen; a banner would be noise.
+  it("surfaces a failed check even when no files currently differ", () => {
     const d = computeDelta(snap({}), snap({}));
-    expect(
-      renderOneLine(d, d, [
-        { version: 1, category: "test", outcome: "fail", at: "2026-07-13T00:00:01.000Z" },
-      ]),
-    ).toBeNull();
+    const line = renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "fail", at: "2026-07-13T00:00:01.000Z" },
+    ]);
+    expect(line).toContain("Session: no files differ from baseline");
+    expect(line).toContain("✗ test");
+  });
+
+  it("keeps a successful check quiet when no files currently differ", () => {
+    const d = computeDelta(snap({}), snap({}));
+    expect(renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "success", at: "2026-07-13T00:00:01.000Z" },
+    ])).toBeNull();
   });
 });
 
@@ -173,7 +251,17 @@ describe("renderMarkdown", () => {
   it("renders a clean 'no changes' report", () => {
     const d = computeDelta(snap({}), snap({}));
     const md = renderMarkdown(d, d, meta);
-    expect(md).toContain("No files changed during this session.");
+    expect(md).toContain("No files currently differ from the session baseline.");
+  });
+
+  it("shows a revert turn even when the session end state matches the baseline", () => {
+    const turn = computeDelta(snap({ "a.txt": e("changed", ".M") }), snap({}));
+    const session = computeDelta(snap({}), snap({}));
+    const md = renderMarkdown(turn, session, meta);
+    expect(md).toContain("## This turn");
+    expect(md).toContain("a.txt");
+    expect(md).toContain("## Session end state");
+    expect(md).toContain("No files currently differ from the session baseline.");
   });
 
   it("renders protected section and category groups", () => {

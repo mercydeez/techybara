@@ -85,6 +85,7 @@ On turn 1 there is no previous turn, so `turn` and `session` are identical.
 | `baseline-missing` | The baseline was absent/corrupt and has been re-established. Earlier changes may be unreported. |
 | `not-a-repo` | Not a git repository; nothing was compared. TechyBara no-ops safely here. |
 | `git-unavailable` | **git could not be run at all.** Nothing was verified. Distinct from `not-a-repo` on purpose: being outside a repo is a fine reason to say nothing, but a missing git means every subsequent silence would be meaningless. |
+| `concurrent` | Another live techybara process holds this session's lock and is reporting the turn. This run skipped without consuming any state; its evidence is picked up next turn. |
 | `error` | The run failed. See `error`. |
 
 Only `reported`, `no-changes`, and `suppressed` carry deltas. Treat every other
@@ -175,11 +176,19 @@ interrupt through `PostToolUseFailure` (with `is_interrupt: true`). The command
 never reached a verdict, so calling it a failed test would be as wrong as
 calling it a pass.
 
-**Turn attribution is derived, not stamped.** Receipts carry a timestamp; the
-report assigns them to a turn by bucketing on the previous checkpoint. This
-keeps the per-Bash-call hook from reading any state, which both removes work
-from the hot path and avoids a Windows file-replacement race with the Stop hook.
-The observable result — which receipts belong to the latest turn — is the same.
+**Turn attribution is derived, not stamped.** A receipt belongs to the first
+turn whose Stop hook observes it unclaimed; the checkpoint records which
+receipts earlier turns already claimed. This keeps the per-Bash-call hook from
+reading any state (no hot-path work, no Windows file-replacement race with the
+Stop hook), and it makes attribution independent of clocks: a delayed receipt
+process or a stepped system clock can push a receipt into the *next* turn, but
+never into an earlier one, never into two turns, and never into none. The
+receipt's timestamp is display and ordering only.
+
+**Bounded retention is explicit.** A session retains at most 10,000 receipt
+files, and individual receipt files larger than 4 KiB are ignored. Hitting either
+limit makes the report partial and adds a visible note; dropped evidence is never
+presented as a complete verification record.
 
 **What `success` does and does not mean.** It means Claude Code fired
 `PostToolUse` (which only fires after a tool call *succeeds*) for a command
