@@ -6,15 +6,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-16
+
 ### Fixed
+- **Receipt attribution no longer trusts the clock.** A verification receipt now
+  belongs to the first turn whose Stop hook observes it unclaimed (the checkpoint
+  records claimed ids), so a delayed receipt process or a stepped clock can no
+  longer misattribute, drop, or double-count a receipt. Receipts are idempotent,
+  keyed by the harness's `tool_use_id`, so a re-delivered hook overwrites the same
+  file instead of duplicating it.
+- **Concurrent lifecycle events are serialized.** A per-session lock guards
+  concurrent Stop hooks and duplicate `SessionStart`s; a losing process reports a
+  `concurrent` status and consumes no state rather than racing the winner.
+- **Executable-bit and submodule changes are seen.** A committed executable-bit
+  change collapsed to an identical blob hash and went undetected; file mode is now
+  carried through and folded into the diff. Submodules (gitlinks) were compared as
+  ordinary blobs — now they are resolved as their own HEAD commit plus a
+  content-sensitive dirty signature, catching a committed pointer move, a
+  clean→dirty transition, and a further edit inside an already-dirty submodule.
+- **State paths are validated and resources are bounded.** State-directory paths
+  are checked before use, and receipt/claim handling is capped so an unbounded
+  stream of receipts degrades visibly rather than growing without limit.
+- **Manual JSON reports no longer read hook stdin.** `techybara report --json` run
+  by hand no longer consumes hook input meant for the lifecycle hooks.
 - **Redirection no longer destroys a verification result.** `>`, `>>`, `2>&1`,
   `&>` and `<` preserve a command's exit status, but they were treated as
   masking — so the very common `npm run typecheck 2>&1` reported `? typecheck`
   instead of `✓ typecheck`. Verified in a real shell rather than assumed:
   `(exit 1) 2>&1` still reports 1, while `(exit 1) | cat` reports 0. Pipelines,
   `||`, `;`, `&`, `$(…)` and `if` still correctly yield `unknown`.
+- **Durable Claude Code hooks.** Hooks are now installed in exec form so they
+  survive shell and quoting differences across platforms instead of silently
+  failing to fire.
 
 ### Changed
+- **Legacy and misplaced hooks are migrated.** `techybara init` now detects and
+  relocates hooks left by earlier versions or written to the wrong place, so a
+  re-init converges on one correct, durable registration instead of stacking
+  duplicates.
+- **Exact hook health diagnostics.** `techybara status` reports the precise state
+  of each expected hook, so a partial or stale installation is named rather than
+  reported as a vague "not installed".
 - **Change counts name their unit.** `Turn: 1 changed (~1)` became
   `Turn: 1 file modified`, and `Session: 8 changed` became
   `Session: 8 files touched`. `+1`/`~6` required decoding and never said whether
@@ -33,6 +65,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - New [docs/shells.md](docs/shells.md): the exact shell semantics assumed, the
   evidence for each rule, nested-shell exit propagation (checked against Claude
   Code 2.1.209 on Windows), and what is deliberately unsupported.
+- Durable project-local installation guidance in the README: how to install
+  TechyBara into a project so its hooks stay registered across sessions.
 
 ## [0.2.0] - 2026-07-15
 
@@ -176,7 +210,8 @@ no change attribution, symlinks skipped in the protected scan, and more). See
 [What TechyBara cannot see](./README.md#what-techybara-cannot-see) rather than
 duplicating them here.
 
-[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/mercydeez/techybara/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mercydeez/techybara/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/mercydeez/techybara/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mercydeez/techybara/releases/tag/v0.1.0

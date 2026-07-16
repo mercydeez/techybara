@@ -1,6 +1,6 @@
 {
   "name": "techybara",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local-first evidence of what differs after a Claude Code session.",
   "type": "module",
   "bin": {
