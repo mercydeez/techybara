@@ -4,9 +4,15 @@
 // changed since the last report). Kept separate from the CLI so it is
 // unit-testable without spawning a process.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
-import { acquireLock, writeFileAtomic } from "../core/fsutil.js";
+import {
+  acquireLock,
+  assertSafeStatePath,
+  ensureSafeStateDirectory,
+  truncateUtf8,
+  writeStateFileAtomic,
+} from "../core/fsutil.js";
 import { computeDelta, deltaFingerprint, type SessionDelta } from "../core/diff.js";
 import { EMPTY_TREE, diffNameStatus, getToplevel, gitAvailable, treeHashesAt } from "../core/git.js";
 import { compileGlobs } from "../core/glob.js";
@@ -15,6 +21,7 @@ import {
   checkpointPath,
   reportPath,
   reportStatePath,
+  safeSessionId,
   sessionDir,
   sessionLockPath,
 } from "../core/paths.js";
@@ -28,12 +35,15 @@ import {
 } from "../core/types.js";
 import {
   hasUnverified,
-  readReceipts,
+  readReceiptStore,
   unclaimedReceipts,
   summarize,
   type Receipt,
 } from "./receipt.js";
 import { renderMarkdown, renderOneLine } from "./render.js";
+
+/** Stored Markdown is a convenience artifact, not an unbounded evidence sink. */
+export const MAX_REPORT_FILE_BYTES = 1024 * 1024;
 
 export type ReportStatus =
   | "reported" // changed since last report -> surface the one-liner
@@ -71,6 +81,8 @@ export interface ReportOptions extends CaptureOptions {
   persistState?: boolean;
   /** Test-only override of the receipt-claim cap. */
   maxClaimedReceipts?: number;
+  /** Test-only override of the stored Markdown cap. */
+  maxReportBytes?: number;
   /** Test-only override of the lock staleness threshold. */
   lockStaleMs?: number;
 }
@@ -93,6 +105,9 @@ export async function runReport(
     if (!(await gitAvailable())) return { status: "git-unavailable" };
     return { status: "not-a-repo" };
   }
+  sessionId = safeSessionId(sessionId);
+  const dir = sessionDir(top, sessionId);
+  ensureSafeStateDirectory(top, dir);
 
   // State-writing runs serialize on the session lock: two concurrent Stop hooks
   // would otherwise both read the checkpoint, both claim the same receipts, and
@@ -100,8 +115,9 @@ export async function runReport(
   // turn, and the loser's evidence is picked up next turn (over-reports later,
   // never doubles, never silences). Manual runs are read-only and need no lock.
   if (!persistState) return reportLocked(top, sessionId, now, opts, false);
-  mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  const release = acquireLock(sessionLockPath(top, sessionId), opts.lockStaleMs);
+  const lockPath = sessionLockPath(top, sessionId);
+  assertSafeStatePath(top, lockPath);
+  const release = acquireLock(lockPath, opts.lockStaleMs);
   if (!release) return { status: "concurrent" };
   try {
     return await reportLocked(top, sessionId, now, opts, true);
@@ -120,21 +136,24 @@ async function reportLocked(
 ): Promise<ReportRunResult> {
   const config = loadConfig(top);
   const bpath = baselinePath(top, sessionId);
+  assertSafeStatePath(top, bpath);
   const baseline = existsSync(bpath) ? readSnapshot(bpath) : null;
 
   if (!baseline) {
     // Lost or corrupt baseline: re-establish it now so the rest of the session
     // has a reference. We deliberately report nothing this turn.
     const fresh = await captureSnapshot(top, sessionId, config, opts);
-    mkdirSync(sessionDir(top, sessionId), { recursive: true });
-    writeFileAtomic(bpath, JSON.stringify(fresh, null, 2) + "\n");
+    ensureSafeStateDirectory(top, sessionDir(top, sessionId));
+    writeStateFileAtomic(top, bpath, JSON.stringify(fresh, null, 2) + "\n");
     return { status: "baseline-missing" };
   }
 
   // Capture ONCE and diff twice. Re-capturing per comparison would double the
   // cost of the common unchanged-turn path for no new information.
   const current = await captureSnapshot(top, sessionId, config, opts);
-  const checkpoint = readCheckpoint(checkpointPath(top, sessionId));
+  const checkpointFile = checkpointPath(top, sessionId);
+  assertSafeStatePath(top, checkpointFile);
+  const checkpoint = readCheckpoint(checkpointFile);
   const isProtected = compileProtected(config.protectedPaths);
 
   // mergeCommittedChanges mutates BOTH of its snapshot arguments, and the two
@@ -157,7 +176,8 @@ async function reportLocked(
   }
 
   const turnNumber = (checkpoint?.turn ?? 0) + 1;
-  const sessionReceipts = readReceipts(top, sessionId);
+  const receiptStore = readReceiptStore(top, sessionId);
+  const sessionReceipts = receiptStore.receipts;
   // A receipt belongs to the first turn whose Stop hook observes it unclaimed.
   // Bucketing here — rather than stamping a turn id at write time — keeps the
   // per-Bash-call hook from having to read any state at all, and keeps
@@ -165,27 +185,45 @@ async function reportLocked(
   // everything to this turn (over-reports), never drops or double-counts.
   const claimed = checkpoint?.claimedReceipts ?? [];
   const turnReceipts = unclaimedReceipts(sessionReceipts, claimed);
+  if (receiptStore.truncated) {
+    markPartial(
+      turn,
+      session,
+      "Verification evidence is partial: the per-session receipt limit was reached or an oversized receipt was ignored.",
+    );
+  }
 
   if (checkpoint?.claimsTruncated) {
     // The claim list dropped ids at some earlier turn, so some of this turn's
     // "unclaimed" receipts may be re-attributed older ones. Partial evidence
     // must be visible, and a degraded turn is never suppressed.
-    turn.degraded = true;
-    turn.notes.push(
+    markPartial(
+      turn,
+      session,
       "Receipt-to-turn attribution is partial: the per-session claim cap was exceeded, so some earlier verification receipts may be re-attributed to this turn.",
     );
   }
 
-  const markdown = renderMarkdown(turn, session, {
+  const reportFileBytes = opts.maxReportBytes ?? MAX_REPORT_FILE_BYTES;
+  const reportMeta = {
     sessionId,
     generatedAt: now.toISOString(),
     baselineAt: baseline.createdAt,
     turnNumber,
     turnReceipts,
     sessionReceipts,
-  });
-  mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  writeFileAtomic(reportPath(top, sessionId), markdown);
+  };
+  let markdown = renderMarkdown(turn, session, reportMeta);
+  if (Buffer.byteLength(markdown, "utf8") > reportFileBytes) {
+    markPartial(
+      turn,
+      session,
+      `Stored Markdown exceeded ${reportFileBytes} bytes and was truncated.`,
+    );
+    markdown = boundMarkdown(renderMarkdown(turn, session, reportMeta), reportFileBytes);
+  }
+  ensureSafeStateDirectory(top, sessionDir(top, sessionId));
+  writeStateFileAtomic(top, reportPath(top, sessionId), markdown, reportFileBytes);
 
   // The turn is now fully processed, so advance the checkpoint — on every path
   // below, including the silent ones. If it only advanced on the "reported"
@@ -223,7 +261,9 @@ async function reportLocked(
     // an earlier reported state — is reported again rather than silenced.
     if (persistState) {
       try {
-        rmSync(reportStatePath(top, sessionId), { force: true });
+        const statePath = reportStatePath(top, sessionId);
+        assertSafeStatePath(top, statePath);
+        rmSync(statePath, { force: true });
       } catch {
         // best-effort; a stale fingerprint only risks one suppressed repeat
       }
@@ -234,6 +274,7 @@ async function reportLocked(
 
   const fingerprint = suppressionFingerprint(session, turnReceipts);
   const statePath = reportStatePath(top, sessionId);
+  assertSafeStatePath(top, statePath);
   const last = readLastFingerprint(statePath);
   // Fresh turn evidence must never be repeat-suppressed, because silence has to mean
   // "checked, complete, nothing new":
@@ -255,7 +296,7 @@ async function reportLocked(
   }
 
   if (persistState) {
-    writeFileAtomic(statePath, JSON.stringify({ fingerprint }) + "\n");
+    writeStateFileAtomic(top, statePath, JSON.stringify({ fingerprint }) + "\n");
   }
   advance();
   return { ...result, oneLine };
@@ -276,6 +317,24 @@ function suppressionFingerprint(session: SessionDelta, turnReceipts: readonly Re
   return createHash("sha1").update(material).digest("hex");
 }
 
+function markPartial(
+  turn: SessionDelta,
+  session: SessionDelta,
+  note: string,
+): void {
+  turn.degraded = true;
+  session.degraded = true;
+  if (!turn.notes.includes(note)) turn.notes.push(note);
+  if (session !== turn && !session.notes.includes(note)) session.notes.push(note);
+}
+
+function boundMarkdown(markdown: string, maxBytes: number): string {
+  if (Buffer.byteLength(markdown, "utf8") <= maxBytes) return markdown;
+  const notice = "\n\n> ⚠️ Stored report truncated at the TechyBara size limit.\n";
+  const boundedNotice = truncateUtf8(notice, maxBytes);
+  const bodyBytes = Math.max(0, maxBytes - Buffer.byteLength(boundedNotice, "utf8"));
+  return truncateUtf8(markdown, bodyBytes) + boundedNotice;
+}
 function writeCheckpoint(
   top: string,
   sessionId: string,
@@ -298,8 +357,8 @@ function writeCheckpoint(
     claimedReceipts,
     ...(claimsTruncated ? { claimsTruncated: true } : {}),
   };
-  mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  writeFileAtomic(checkpointPath(top, sessionId), JSON.stringify(checkpoint, null, 2) + "\n");
+  ensureSafeStateDirectory(top, sessionDir(top, sessionId));
+  writeStateFileAtomic(top, checkpointPath(top, sessionId), JSON.stringify(checkpoint, null, 2) + "\n");
 }
 
 /** Returns null for a missing, corrupt, or wrong-version checkpoint. */

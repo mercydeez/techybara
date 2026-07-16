@@ -147,4 +147,14 @@ describe("runReport", () => {
     writeFileSync(join(dir, "b.txt"), "real\n");
     expect((await runReport(dir, SID)).status).toBe("reported");
   });
+  it("stores a bounded, visibly partial Markdown report", async () => {
+    await writeBaseline(dir, SID);
+    writeFileSync(join(dir, "a.txt"), "two\n");
+
+    const res = await runReport(dir, SID, new Date(), { maxReportBytes: 700 });
+    expect(res.status).toBe("reported");
+    expect(res.session?.degraded).toBe(true);
+    expect(res.markdown).toContain("Stored report truncated");
+    expect(Buffer.byteLength(res.markdown ?? "", "utf8")).toBeLessThanOrEqual(700);
+  });
 });

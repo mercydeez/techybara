@@ -185,6 +185,11 @@ process or a stepped system clock can push a receipt into the *next* turn, but
 never into an earlier one, never into two turns, and never into none. The
 receipt's timestamp is display and ordering only.
 
+**Bounded retention is explicit.** A session retains at most 10,000 receipt
+files, and individual receipt files larger than 4 KiB are ignored. Hitting either
+limit makes the report partial and adds a visible note; dropped evidence is never
+presented as a complete verification record.
+
 **What `success` does and does not mean.** It means Claude Code fired
 `PostToolUse` (which only fires after a tool call *succeeds*) for a command
 TechyBara classified as verification. It does **not** mean the tests were

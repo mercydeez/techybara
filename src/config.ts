@@ -3,6 +3,7 @@
 // `techybara init` protects common secret/credential/CI paths out of the box.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertSafeStatePath } from "./core/fsutil.js";
 
 export interface TechyBaraConfig {
   /** Glob patterns whose matches are surfaced loudly and hashed directly (even when gitignored). */
@@ -54,9 +55,11 @@ export function defaultConfig(): TechyBaraConfig {
  */
 export function loadConfig(top: string): TechyBaraConfig {
   const base = defaultConfig();
+  const path = join(top, ".techybara", "config.json");
+  assertSafeStatePath(top, path);
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(join(top, ".techybara", "config.json"), "utf8"));
+    raw = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return base;
   }

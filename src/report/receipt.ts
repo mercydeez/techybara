@@ -13,13 +13,25 @@
 // carry tokens: `curl -H "Authorization: Bearer ..."`), never stdout/stderr,
 // never environment values. Commands that are not verification commands
 // produce no receipt at all.
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, opendirSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { writeFileAtomic } from "../core/fsutil.js";
-import { receiptsDir } from "../core/paths.js";
+import {
+  assertSafeStatePath,
+  ensureSafeStateDirectory,
+  writeStateFileAtomic,
+} from "../core/fsutil.js";
+import {
+  receiptsDir,
+  receiptsTruncatedPath,
+  safeSessionId,
+} from "../core/paths.js";
 
 export const RECEIPT_VERSION = 1;
+/** Hard retention ceiling; concurrent writers may exceed it by a small race window. */
+export const MAX_RECEIPT_FILES = 10_000;
+/** Valid receipts are under 1 KiB; leave room for forwards-compatible fields. */
+export const MAX_RECEIPT_FILE_BYTES = 4 * 1024;
 
 export type VerificationCategory =
   | "test"
@@ -290,6 +302,7 @@ export function writeReceipt(
   classification: Classification,
   observed: Observation,
   at: Date = new Date(),
+  maxFiles = MAX_RECEIPT_FILES,
 ): void {
   const verdict = decideOutcome(classification, observed);
   const receipt: Receipt = {
@@ -305,16 +318,29 @@ export function writeReceipt(
     ...(verdict.reason ? { reason: verdict.reason } : {}),
   };
 
+  sessionId = safeSessionId(sessionId);
   const dir = receiptsDir(top, sessionId);
-  // writeFileAtomic writes a sibling temp file, so the directory must exist
-  // first. recursive:true is also EEXIST-safe, which matters: hooks run in
-  // parallel, so several receipt processes can race here.
-  mkdirSync(dir, { recursive: true });
+  ensureSafeStateDirectory(top, dir);
+  const path = join(dir, `${receiptFileId(observed)}.json`);
+  assertSafeStatePath(top, path);
+
+  // Existing tool_use_id files are idempotent overwrites and remain allowed at
+  // the cap. New calls are refused and leave a sticky marker so Stop reports
+  // partial verification instead of silently dropping evidence.
+  if (!existsSync(path) && receiptFileCountAtLeast(dir, maxFiles)) {
+    writeStateFileAtomic(top, receiptsTruncatedPath(top, sessionId), "receipt limit reached\n");
+    return;
+  }
+
   // One file per receipt, never an append or a read-modify-write of a shared
   // array: parallel hooks would interleave or lose writes. The name IS the
-  // identity: tool_use_id keyed names dedupe re-delivered events atomically,
-  // and distinct calls can never collide without coordination.
-  writeFileAtomic(join(dir, `${receiptFileId(observed)}.json`), JSON.stringify(receipt) + "\n");
+  // identity: tool_use_id keyed names dedupe re-delivered events atomically.
+  writeStateFileAtomic(
+    top,
+    path,
+    JSON.stringify(receipt) + "\n",
+    MAX_RECEIPT_FILE_BYTES,
+  );
 }
 
 /**
@@ -329,6 +355,21 @@ function receiptFileId(observed: Observation): string {
   const cleaned = (observed.toolUseId ?? "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
   if (!cleaned || cleaned === "." || cleaned === "..") return randomUUID();
   return `${cleaned}-${observed.succeeded ? "ok" : "fail"}`;
+}
+function receiptFileCountAtLeast(dir: string, limit: number): boolean {
+  let count = 0;
+  const handle = opendirSync(dir);
+  try {
+    for (;;) {
+      const entry = handle.readSync();
+      if (!entry) return false;
+      if (entry.isFile() && entry.name.endsWith(".json") && ++count >= limit) {
+        return true;
+      }
+    }
+  } finally {
+    handle.closeSync();
+  }
 }
 
 const UNKNOWN_REASONS: readonly string[] = [
@@ -381,29 +422,71 @@ export interface StoredReceipt extends Receipt {
  * sharing a millisecond still read back deterministically). Unreadable files
  * are skipped.
  */
-export function readReceipts(top: string, sessionId: string): StoredReceipt[] {
-  let names: string[];
+export interface ReceiptStoreRead {
+  receipts: StoredReceipt[];
+  /** Evidence was refused, oversized, or exceeded the read ceiling. */
+  truncated: boolean;
+}
+
+export function readReceiptStore(top: string, sessionId: string): ReceiptStoreRead {
+  sessionId = safeSessionId(sessionId);
+  const dir = receiptsDir(top, sessionId);
+  const marker = receiptsTruncatedPath(top, sessionId);
+  assertSafeStatePath(top, dir);
+  assertSafeStatePath(top, marker);
+  let truncated = existsSync(marker);
+  const names: string[] = [];
   try {
-    names = readdirSync(receiptsDir(top, sessionId));
-  } catch {
-    return []; // no receipts directory: nothing was observed
-  }
-  const out: StoredReceipt[] = [];
-  for (const name of names) {
-    // A hard-killed hook leaves a `<uuid>.json.tmp-<pid>-<ts>` sibling behind.
-    // Do not "simplify" this to a bare readdir — half-written temp files must
-    // never be read as receipts.
-    if (!name.endsWith(".json")) continue;
+    const handle = opendirSync(dir);
     try {
-      const r = parseReceipt(readFileSync(join(receiptsDir(top, sessionId), name), "utf8"));
-      if (r) out.push({ ...r, id: name.slice(0, -".json".length) });
+      for (;;) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        // Temp files and linked entries are never receipts.
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        if (names.length >= MAX_RECEIPT_FILES) {
+          truncated = true;
+          break;
+        }
+        names.push(entry.name);
+      }
+    } finally {
+      handle.closeSync();
+    }
+  } catch {
+    return { receipts: [], truncated };
+  }
+
+  const out: StoredReceipt[] = [];
+  for (const name of names.sort()) {
+    const path = join(dir, name);
+    try {
+      assertSafeStatePath(top, path);
+      if (statSync(path).size > MAX_RECEIPT_FILE_BYTES) {
+        truncated = true;
+        continue;
+      }
+      const receipt = parseReceipt(readFileSync(path, "utf8"));
+      if (receipt) {
+        out.push({ ...receipt, id: name.slice(0, -".json".length) });
+      } else {
+        truncated = true;
+      }
     } catch {
-      // unreadable receipt: skip it rather than fail the whole report
+      truncated = true;
+      // Unreadable/corrupt receipts are ignored; their absence cannot become a
+      // positive verification claim.
     }
   }
-  return out.sort((a, b) =>
+  out.sort((a, b) =>
     a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
+  return { receipts: out, truncated };
+}
+
+/** Backwards-compatible convenience for callers that do not need cap metadata. */
+export function readReceipts(top: string, sessionId: string): StoredReceipt[] {
+  return readReceiptStore(top, sessionId).receipts;
 }
 
 /**

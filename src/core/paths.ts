@@ -1,6 +1,10 @@
 // Filesystem locations for TechyBara state, all rooted at the repo top-level so
 // they resolve identically no matter which subdirectory a session launched from.
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+
+/** Hook-controlled ids must never create unbounded filenames or report text. */
+export const MAX_SESSION_ID_LENGTH = 128;
 
 export function stateDir(top: string): string {
   return join(top, ".techybara");
@@ -15,7 +19,12 @@ export function safeSessionId(sessionId: string): string {
   const cleaned = sessionId.replace(/[^A-Za-z0-9._-]/g, "_");
   // "." / ".." would resolve outside the sessions directory.
   if (cleaned.length === 0 || cleaned === "." || cleaned === "..") return "unknown";
-  return cleaned;
+  if (cleaned.length <= MAX_SESSION_ID_LENGTH) return cleaned;
+
+  // Keep long ids deterministic without letting two ids that share a prefix
+  // collapse onto the same session directory.
+  const suffix = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+  return `${cleaned.slice(0, MAX_SESSION_ID_LENGTH - suffix.length - 1)}-${suffix}`;
 }
 
 export function sessionDir(top: string, sessionId: string): string {
@@ -50,6 +59,11 @@ export function sessionLockPath(top: string, sessionId: string): string {
 /** One file per verification receipt — see report/receipt.ts for why. */
 export function receiptsDir(top: string, sessionId: string): string {
   return join(sessionDir(top, sessionId), "receipts");
+}
+
+/** Sticky marker: at least one receipt was refused because the store was full. */
+export function receiptsTruncatedPath(top: string, sessionId: string): string {
+  return join(sessionDir(top, sessionId), "receipts-truncated");
 }
 
 export function errorLogPath(top: string): string {

@@ -233,6 +233,14 @@ Being clear about the edges is part of the tool.
   fixed number of entries so it can't stall a hook on a pathological tree. If a repo
   is large enough to hit that limit, the turn is reported as **partial verification**
   — a visible ⚠️, never silent.
+- **State and hook inputs are bounded.** Hook payloads stop at 256 KiB; a session
+  retains at most 10,000 receipt files (4 KiB each); the error log stops at 64 KiB;
+  state JSON stops at 8 MiB; and stored Markdown stops at 1 MiB. If a receipt or
+  report cap affects evidence, the report is visibly marked partial.
+- **Linked state paths are refused.** TechyBara rejects a symlink/junction at
+  `.techybara` or inside the state path before reading or writing it. This is
+  best-effort hardening, not a security boundary: a process that can concurrently
+  rewrite the repository can still race filesystem checks.
 - **Partial verification is always visible.** Timeouts, internal errors, a
   lost/rebuilt baseline, an unusable git, and an incomplete scan all produce a ⚠️
   message rather than silence. Silence is only ever emitted after a complete
@@ -278,11 +286,12 @@ Everything TechyBara persists, and nothing else:
 | Path | Contents |
 | --- | --- |
 | `config.json` | Your configuration. |
-| `error.log` | Timestamped internal errors, so a failure is never silent. |
+| `error.log` | Bounded timestamped internal errors, so a failure is never silent. |
 | `sessions/<id>/baseline.json` | Per-path git status codes and **blob hashes** as of session start. Hashes, never bytes. |
 | `sessions/<id>/checkpoint.json` | The same shape, as of the end of the last turn, plus a turn counter. |
-| `sessions/<id>/receipts/*.json` | One per observed verification: `{version, category, outcome, at, durationMs?, reason?}`. `reason` is a closed enum (e.g. `piped-exit-status`). No command, no output. |
-| `sessions/<id>/report.md` | The rendered human report — paths and change kinds. |
+| `sessions/<id>/receipts/*.json` | One per observed verification, keyed by tool-use id when available: `{version, category, outcome, at, durationMs?, reason?}`. No command, no output. |
+| `sessions/<id>/receipts-truncated` | Sticky marker that receipt retention hit its cap; later reports remain visibly partial. |
+| `sessions/<id>/report.md` | The bounded rendered human report — paths and change kinds. |
 | `sessions/<id>/last-reported.json` | A single hash used to suppress repeat banners. |
 
 The dogfood harness sweeps this whole directory for secret values, command text,
@@ -350,7 +359,7 @@ Claude Code turn ──► Bash tool call
     │                    classify the command, keep only the category
     │                             │
     │                             ▼
-    │                    .techybara/sessions/<id>/receipts/<uuid>.json
+    │                    .techybara/sessions/<id>/receipts/<tool-use-id-or-uuid>.json
     ▼
 Stop hook
     │

@@ -1,14 +1,19 @@
 // Snapshot engine: capture the working-tree state (relative to HEAD) as content
 // hashes, so a later capture can be diffed to find what changed *during* a
 // session — not merely what is dirty vs HEAD.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type TechyBaraConfig } from "../config.js";
-import { acquireLock, writeFileAtomic } from "./fsutil.js";
+import {
+  acquireLock,
+  assertSafeStatePath,
+  ensureSafeStateDirectory,
+  writeStateFileAtomic,
+} from "./fsutil.js";
 import { getHead, getPorcelain, getToplevel, hashObjects, resolveSubmoduleState } from "./git.js";
 import { compileGlobs } from "./glob.js";
 import { findProtectedFiles } from "./protected.js";
-import { baselinePath, sessionDir, sessionLockPath, sessionsDir } from "./paths.js";
+import { baselinePath, safeSessionId, sessionDir, sessionLockPath, sessionsDir } from "./paths.js";
 import { SNAPSHOT_VERSION, type Snapshot, type SnapshotEntry } from "./types.js";
 
 const KEEP_SESSIONS = 20;
@@ -282,8 +287,12 @@ export async function writeBaseline(
 ): Promise<SnapshotOutcome> {
   const top = await getToplevel(cwd);
   if (!top) return { status: "not-a-repo" };
+  sessionId = safeSessionId(sessionId);
 
+  const dir = sessionDir(top, sessionId);
   const bpath = baselinePath(top, sessionId);
+  assertSafeStatePath(top, dir);
+  assertSafeStatePath(top, bpath);
   if (existsSync(bpath)) {
     return { status: "exists", top };
   }
@@ -292,14 +301,16 @@ export async function writeBaseline(
   // serializes them so exactly one process captures and writes. A held lock
   // means another live process is establishing the baseline right now —
   // reporting "exists" (kept) is the honest summary of that.
-  mkdirSync(sessionDir(top, sessionId), { recursive: true });
-  const release = acquireLock(sessionLockPath(top, sessionId));
+  ensureSafeStateDirectory(top, dir);
+  const lockPath = sessionLockPath(top, sessionId);
+  assertSafeStatePath(top, lockPath);
+  const release = acquireLock(lockPath);
   if (!release) return { status: "exists", top };
   try {
     if (existsSync(bpath)) return { status: "exists", top };
     const config = configOverride ?? loadConfig(top);
     const snapshot = await captureSnapshot(top, sessionId, config);
-    writeFileAtomic(bpath, JSON.stringify(snapshot, null, 2) + "\n");
+    writeStateFileAtomic(top, bpath, JSON.stringify(snapshot, null, 2) + "\n");
     pruneOldSessions(top);
     return { status: "written", top, snapshot };
   } finally {
@@ -325,6 +336,7 @@ function pruneOldSessions(top: string): void {
   const dir = sessionsDir(top);
   let names: string[];
   try {
+    assertSafeStatePath(top, dir);
     names = readdirSync(dir);
   } catch {
     return;
@@ -333,7 +345,10 @@ function pruneOldSessions(top: string): void {
     .map((name) => {
       const full = join(dir, name);
       try {
-        return { full, mtime: statSync(full).mtimeMs };
+        assertSafeStatePath(top, full);
+        const stat = statSync(full);
+        if (!stat.isDirectory()) return null;
+        return { full, mtime: stat.mtimeMs };
       } catch {
         return null;
       }
@@ -343,6 +358,7 @@ function pruneOldSessions(top: string): void {
 
   for (const stale of dirs.slice(KEEP_SESSIONS)) {
     try {
+      assertSafeStatePath(top, stale.full);
       rmSync(stale.full, { recursive: true, force: true });
     } catch {
       // best-effort cleanup

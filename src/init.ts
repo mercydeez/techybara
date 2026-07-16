@@ -16,7 +16,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { defaultConfig } from "./config.js";
-import { writeFileAtomic } from "./core/fsutil.js";
+import {
+  assertSafeStatePath,
+  ensureSafeStateDirectory,
+  writeFileAtomic,
+  writeStateFileAtomic,
+} from "./core/fsutil.js";
 
 const HOOK_TIMEOUT_SECONDS = 10;
 
@@ -163,6 +168,16 @@ export function init(opts: InitOptions): InitResult {
   const techybaraDir = join(cwd, ".techybara");
   const configPath = join(techybaraDir, "config.json");
   const gitignorePath = join(cwd, ".gitignore");
+  try {
+    assertSafeStatePath(cwd, techybaraDir);
+    assertSafeStatePath(cwd, configPath);
+  } catch (err) {
+    return {
+      changes,
+      wrote: false,
+      error: `Refusing unsafe TechyBara state path: ${String(err)}`,
+    };
+  }
 
   // --- 1. Claude Code settings: merge our hooks additively ---
   let settings: Record<string, unknown> = {};
@@ -223,9 +238,9 @@ export function init(opts: InitOptions): InitResult {
   mkdirSync(claudeDir, { recursive: true });
   writeFileAtomic(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
-  mkdirSync(techybaraDir, { recursive: true });
+  ensureSafeStateDirectory(cwd, techybaraDir);
   if (!configExists) {
-    writeFileSync(configPath, JSON.stringify(defaultConfig(), null, 2) + "\n", "utf8");
+    writeStateFileAtomic(cwd, configPath, JSON.stringify(defaultConfig(), null, 2) + "\n");
   }
 
   if (gitignoreNeedsEntry) {
@@ -250,6 +265,19 @@ export function uninstall(opts: { cwd: string; purge: boolean }): UninstallResul
   const changes: string[] = [];
   const settingsPath = join(cwd, ".claude", "settings.json");
   const techybaraDir = join(cwd, ".techybara");
+
+  const hadState = existsSync(techybaraDir);
+  if (purge && hadState) {
+    try {
+      assertSafeStatePath(cwd, techybaraDir);
+    } catch (err) {
+      return {
+        changes,
+        wrote: false,
+        error: `Refusing to purge unsafe TechyBara state path: ${String(err)}`,
+      };
+    }
+  }
 
   let removedHooks = false;
   if (existsSync(settingsPath)) {
@@ -280,7 +308,6 @@ export function uninstall(opts: { cwd: string; purge: boolean }): UninstallResul
     }
   }
 
-  const hadState = existsSync(techybaraDir);
   if (purge && hadState) {
     rmSync(techybaraDir, { recursive: true, force: true });
     changes.push(`Deleted ${techybaraDir}`);
