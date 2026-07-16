@@ -17,29 +17,46 @@ afterEach(() => {
 function settings(): any {
   return JSON.parse(readFileSync(join(dir, ".claude", "settings.json"), "utf8"));
 }
-function commandsFor(event: string): string[] {
+/** Our exec-form handlers under an event (command === "node"), with args. */
+function ourArgs(event: string): string[][] {
+  return (settings().hooks?.[event] ?? [])
+    .flatMap((g: any) => g.hooks ?? [])
+    .filter((h: any) => h.command === "node")
+    .map((h: any) => h.args);
+}
+/** Raw command values under an event (for asserting unrelated hooks survive). */
+function rawCommands(event: string): unknown[] {
   return (settings().hooks?.[event] ?? []).flatMap((g: any) =>
     (g.hooks ?? []).map((h: any) => h.command),
   );
 }
 
-describe("hook registration", () => {
-  it("registers all four lifecycle events", () => {
+describe("hook registration (exec form)", () => {
+  it("registers all four lifecycle events as exec-form node invocations", () => {
     init({ cwd: dir, cliPath: CLI, dryRun: false });
-    expect(commandsFor("SessionStart")[0]).toContain("snapshot");
-    expect(commandsFor("Stop")[0]).toContain("report --hook");
-    expect(commandsFor("PostToolUse")[0]).toContain("receipt --ok");
-    expect(commandsFor("PostToolUseFailure")[0]).toContain("receipt --fail");
+    expect(ourArgs("SessionStart")).toEqual([[CLI, "snapshot"]]);
+    expect(ourArgs("Stop")).toEqual([[CLI, "report", "--hook"]]);
+    expect(ourArgs("PostToolUse")).toEqual([[CLI, "receipt", "--ok"]]);
+    expect(ourArgs("PostToolUseFailure")).toEqual([[CLI, "receipt", "--fail"]]);
+    // Every one is exec form: command "node", never a shell string.
+    for (const event of ["SessionStart", "Stop", "PostToolUse", "PostToolUseFailure"]) {
+      for (const g of settings().hooks[event]) {
+        for (const h of g.hooks) {
+          expect(h.command).toBe("node");
+          expect(Array.isArray(h.args)).toBe(true);
+        }
+      }
+    }
   });
 
   it("restricts the receipt hooks to Bash so they don't fire after every tool", () => {
     init({ cwd: dir, cliPath: CLI, dryRun: false });
     const post = settings().hooks.PostToolUse.find((g: any) =>
-      g.hooks.some((h: any) => h.command.includes("receipt --ok")),
+      g.hooks.some((h: any) => h.command === "node" && h.args.includes("--ok")),
     );
     expect(post.matcher).toBe("Bash");
     const postFail = settings().hooks.PostToolUseFailure.find((g: any) =>
-      g.hooks.some((h: any) => h.command.includes("receipt --fail")),
+      g.hooks.some((h: any) => h.command === "node" && h.args.includes("--fail")),
     );
     expect(postFail.matcher).toBe("Bash");
   });
@@ -58,15 +75,15 @@ describe("hook registration", () => {
     init({ cwd: dir, cliPath: CLI, dryRun: false });
     init({ cwd: dir, cliPath: CLI, dryRun: false });
     for (const event of ["SessionStart", "Stop", "PostToolUse", "PostToolUseFailure"]) {
-      expect(commandsFor(event)).toHaveLength(1);
+      expect(ourArgs(event)).toHaveLength(1);
     }
   });
 
   it("refreshes a moved install rather than duplicating it", () => {
-    init({ cwd: dir, cliPath: "C:/old/dist/cli.js", dryRun: false });
-    init({ cwd: dir, cliPath: "C:/new/dist/cli.js", dryRun: false });
-    expect(commandsFor("PostToolUse")).toHaveLength(1);
-    expect(commandsFor("PostToolUse")[0]).toContain("C:/new/dist/cli.js");
+    init({ cwd: dir, cliPath: "C:/old/techybara/dist/cli.js", dryRun: false });
+    init({ cwd: dir, cliPath: "C:/new/techybara/dist/cli.js", dryRun: false });
+    expect(ourArgs("PostToolUse")).toHaveLength(1);
+    expect(ourArgs("PostToolUse")[0][0]).toBe("C:/new/techybara/dist/cli.js");
   });
 });
 
@@ -77,9 +94,8 @@ describe("uninstall isolation", () => {
     expect(settings().hooks).toBeUndefined();
   });
 
-  // The reason recognition stays anchored to specific TechyBara subcommands:
-  // plenty of tools ship a cli.js, and deleting a user's hook would be a
-  // settings-destroying bug.
+  // Recognition is anchored to a techybara/dist/cli.js path, so an unrelated
+  // package's cli.js is never touched — even when it runs an identical subcommand.
   it("never removes an unrelated hook that also runs a cli.js", () => {
     mkdirSync(join(dir, ".claude"), { recursive: true });
     writeFileSync(
@@ -91,7 +107,9 @@ describe("uninstall isolation", () => {
               matcher: "Edit",
               hooks: [
                 { type: "command", command: 'node "./node_modules/eslint/cli.js" --fix' },
-                { type: "command", command: 'node "./tools/cli.js" receipt --ok --custom' },
+                // exact TechyBara subcommand, but a DIFFERENT package's cli.js
+                { type: "command", command: "node", args: ["./tools/other/cli.js", "receipt", "--ok"] },
+                { type: "command", command: 'node "./tools/other/cli.js" snapshot' },
               ],
             },
           ],
@@ -101,11 +119,15 @@ describe("uninstall isolation", () => {
     init({ cwd: dir, cliPath: CLI, dryRun: false });
     uninstall({ cwd: dir, purge: false });
 
-    const remaining = commandsFor("PostToolUse");
+    const remaining = rawCommands("PostToolUse");
     expect(remaining).toContain('node "./node_modules/eslint/cli.js" --fix');
-    // trailing flags mean this is not our exact command shape either
-    expect(remaining).toContain('node "./tools/cli.js" receipt --ok --custom');
-    expect(remaining.some((c) => c === `node "${CLI}" receipt --ok`)).toBe(false);
+    expect(remaining).toContain('node "./tools/other/cli.js" snapshot');
+    // the exec-form other-package hook survives too
+    const remainingArgs = (settings().hooks.PostToolUse ?? []).flatMap((g: any) =>
+      (g.hooks ?? []).filter((h: any) => Array.isArray(h.args)).map((h: any) => h.args[0]),
+    );
+    expect(remainingArgs).toContain("./tools/other/cli.js");
+    expect(remainingArgs).not.toContain(CLI);
   });
 
   it("preserves a sibling hook and its matcher in a group we share", () => {
@@ -126,12 +148,12 @@ describe("uninstall isolation", () => {
 
     const s = settings();
     expect(s.model).toBe("claude-opus-4-8");
-    expect(commandsFor("PostToolUse")).toEqual(["echo mine"]);
+    expect(rawCommands("PostToolUse")).toEqual(["echo mine"]);
     expect(s.hooks.PostToolUse[0].matcher).toBe("Bash");
   });
 
-  // The sweep over every event key, rather than only the pairs we currently
-  // install: a hook left behind by an older layout must still be cleaned up.
+  // The sweep over every event key: a hook left behind by an older layout must
+  // still be cleaned up, in either form.
   it("removes one of our hooks even if it sits under an unexpected event", () => {
     mkdirSync(join(dir, ".claude"), { recursive: true });
     writeFileSync(

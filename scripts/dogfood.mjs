@@ -134,26 +134,57 @@ try {
   check("init is idempotent (byte-identical second run)", afterFirst === afterSecond);
 
   const settings = JSON.parse(afterSecond);
-  const cmds = (event) =>
-    (settings.hooks?.[event] ?? []).flatMap((g) => (g.hooks ?? []).map((h) => h.command));
-  check("registers SessionStart", cmds("SessionStart").some((c) => c.includes("snapshot")));
-  check("registers Stop", cmds("Stop").some((c) => c.includes("report --hook")));
-  check("registers PostToolUse", cmds("PostToolUse").some((c) => c.includes("receipt --ok")));
+  const ROOTED_CLI = "${CLAUDE_PROJECT_DIR}/node_modules/techybara/dist/cli.js";
+  // Our exec-form handlers under an event: {command:"node", args:[cli, ...sub]}.
+  const ours = (event) =>
+    (settings.hooks?.[event] ?? []).flatMap((g) => (g.hooks ?? []).filter((h) => h.command === "node"));
+  const argsOf = (event) => ours(event).map((h) => h.args);
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const registersExec = (event, ...sub) =>
+    argsOf(event).some((a) => eq(a, [ROOTED_CLI, ...sub]));
+
+  check("registers SessionStart as exec form", registersExec("SessionStart", "snapshot"), JSON.stringify(argsOf("SessionStart")));
+  check("registers Stop as exec form", registersExec("Stop", "report", "--hook"), JSON.stringify(argsOf("Stop")));
+  check("registers PostToolUse as exec form", registersExec("PostToolUse", "receipt", "--ok"), JSON.stringify(argsOf("PostToolUse")));
+  check("registers PostToolUseFailure as exec form", registersExec("PostToolUseFailure", "receipt", "--fail"), JSON.stringify(argsOf("PostToolUseFailure")));
   check(
-    "registers PostToolUseFailure",
-    cmds("PostToolUseFailure").some((c) => c.includes("receipt --fail")),
+    "every one of our hooks is exec form (command 'node', args array, no shell string)",
+    ["SessionStart", "Stop", "PostToolUse", "PostToolUseFailure"].every((e) =>
+      ours(e).every((h) => h.command === "node" && Array.isArray(h.args)),
+    ),
   );
   check(
     "receipt hook is scoped to Bash (not every tool)",
     settings.hooks.PostToolUse.some(
-      (g) => g.matcher === "Bash" && g.hooks.some((h) => h.command.includes("receipt --ok")),
+      (g) => g.matcher === "Bash" && g.hooks.some((h) => h.command === "node" && h.args.includes("--ok")),
     ),
   );
   check("preserves unrelated settings", settings.model === "claude-opus-4-8");
   check(
-    "preserves the user's unrelated hook",
-    cmds("PostToolUse").includes('node "./tools/eslint/cli.js" --fix'),
+    "preserves the user's unrelated shell-form hook",
+    settings.hooks.PostToolUse.flatMap((g) => g.hooks.map((h) => h.command)).includes(
+      'node "./tools/eslint/cli.js" --fix',
+    ),
   );
+  // Durability: a real local install is rooted at ${CLAUDE_PROJECT_DIR} so the
+  // hook survives the project moving or npm pruning its cache — not a baked path.
+  check(
+    "roots the CLI arg at ${CLAUDE_PROJECT_DIR} (durable across moves/cache cleanup)",
+    argsOf("SessionStart").every((a) => a[0] === ROOTED_CLI),
+    JSON.stringify(argsOf("SessionStart")),
+  );
+  check(
+    "does not bake the absolute repo path into any arg",
+    argsOf("SessionStart").every((a) => a.every((tok) => !tok.includes(repo))),
+    JSON.stringify(argsOf("SessionStart")),
+  );
+  check(
+    "no shell quoting added to exec-form args",
+    argsOf("SessionStart").every((a) => a.every((tok) => !/["']/.test(tok))),
+    JSON.stringify(argsOf("SessionStart")),
+  );
+  const statusOut = tb(["status"]);
+  check("status reports hooks installed and healthy", /installed and healthy/.test(statusOut), statusOut);
 
   // --- 4. Turn 1: baseline, then change files --------------------------------
   console.log("\ndogfood: turn 1 — changes with a passing test");

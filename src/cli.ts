@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
-import { init, uninstall } from "./init.js";
+import { diagnoseHooks, init, uninstall } from "./init.js";
 import {
   assertSafeStatePath,
   ensureSafeStateDirectory,
@@ -380,32 +379,31 @@ async function reportBody(args: readonly string[], json: boolean): Promise<numbe
   }
 }
 
-/** Manual diagnostic: can TechyBara run here, and is it installed? */
+/** Manual diagnostic: can TechyBara run here, and are the hooks healthy? */
 async function cmdStatus(): Promise<number> {
   const cwd = process.cwd();
   const hasGit = await gitAvailable();
   const top = hasGit ? await getToplevel(cwd) : null;
 
+  // Diagnose against the repo top-level: that is where init writes settings and
+  // where Claude Code sets ${CLAUDE_PROJECT_DIR}, so a rooted hook resolves the
+  // same way status checks it. Fall back to cwd outside a repo.
+  const diag = diagnoseHooks(top ?? cwd, selfCliPath());
+
   const lines: string[] = [`TechyBara ${VERSION}`];
   lines.push(`  git:    ${hasGit ? "available" : "NOT FOUND — TechyBara cannot verify anything"}`);
   lines.push(`  repo:   ${top ?? "not a git repository — hooks will safely no-op"}`);
-  lines.push(`  hooks:  ${hooksInstalled(cwd) ? "installed" : "not installed (run: techybara init)"}`);
+  if (diag.healthy) {
+    const where = diag.target.durability === "project-local" ? "project-local, durable" : "external install";
+    lines.push(`  hooks:  installed and healthy (${where})`);
+  } else if (!diag.installed) {
+    lines.push(`  hooks:  not installed (run: techybara init)`);
+  } else {
+    lines.push(`  hooks:  needs attention:`);
+    for (const issue of diag.issues) lines.push(`            • ${issue}`);
+  }
   process.stdout.write(lines.join("\n") + "\n");
   return 0;
-}
-
-/**
- * A v0.1 install has the Stop hook but no receipt hooks, so verification would
- * silently never be observed. Report that as "not installed" rather than
- * "installed", so `status` prompts the re-init that actually fixes it.
- */
-function hooksInstalled(cwd: string): boolean {
-  try {
-    const text = readFileSync(join(cwd, ".claude", "settings.json"), "utf8");
-    return text.includes("report --hook") && text.includes("receipt --ok");
-  } catch {
-    return false;
-  }
 }
 
 function cmdUninstall(args: readonly string[]): number {
@@ -440,6 +438,9 @@ function cmdInit(args: readonly string[]): number {
   process.stdout.write(`${header}\n`);
   for (const change of result.changes) {
     process.stdout.write(`  • ${change}\n`);
+  }
+  for (const warning of result.warnings) {
+    process.stdout.write(`\n⚠️  ${warning}\n`);
   }
   if (dryRun) {
     process.stdout.write(`\nRe-run without --dry-run to apply.\n`);

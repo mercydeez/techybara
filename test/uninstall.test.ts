@@ -38,10 +38,10 @@ describe("uninstall", () => {
     expect(s.model).toBe("claude-opus-4-8");
     // our SessionStart hook is gone entirely
     expect(s.hooks.SessionStart).toBeUndefined();
-    // user's Stop hook remains; ours is gone
-    const stopCmds = (s.hooks.Stop ?? []).flatMap((g: any) => g.hooks.map((h: any) => h.command));
-    expect(stopCmds).toContain("echo user");
-    expect(stopCmds.some((c: string) => c.includes("report --hook"))).toBe(false);
+    // user's Stop hook remains; ours (exec-form node ... report --hook) is gone
+    const stopEntries = (s.hooks.Stop ?? []).flatMap((g: any) => g.hooks);
+    expect(stopEntries.some((h: any) => h.command === "echo user")).toBe(true);
+    expect(stopEntries.some((h: any) => h.command === "node")).toBe(false);
   });
 
   it("keeps .techybara/ by default and deletes it with --purge", () => {
