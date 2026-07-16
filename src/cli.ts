@@ -284,7 +284,9 @@ async function cmdReport(args: readonly string[]): Promise<number> {
 }
 
 async function reportBody(args: readonly string[], json: boolean): Promise<number> {
-  const input = await readHookInput();
+  const input = args.includes("--hook")
+    ? await readHookInput()
+    : ({ status: "empty" } as const);
   const fallbackSessionId = safeSessionId(flagValue(args, "--session") ?? "manual");
   if (input.status === "rejected") {
     const message = `hook input rejected: ${input.reason}`;
