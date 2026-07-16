@@ -86,11 +86,22 @@ only partial (see the limits below), you get a visible ⚠️ instead of silence
 
 ## Install
 
-Requirements: **Node.js ≥ 18.3** and **git**. Run this from your repository root:
+Requirements: **Node.js ≥ 18.3** and **git**. For hooks that keep working across
+reinstalls, upgrades, and moving the project, install TechyBara into the repo and
+then initialise it, from your repository root:
 
 ```bash
+npm install --save-dev techybara
 npx techybara init
 ```
+
+`init` roots each hook at `${CLAUDE_PROJECT_DIR}/node_modules/techybara/dist/cli.js`,
+so it survives npm cache cleanup and the project directory moving.
+
+> **One-off `npx techybara init` (no local install)** still works, but it can only
+> point the hooks at a temporary npx cache path that npm may delete at any time —
+> `init` prints a warning when it has to do this. Install TechyBara locally (above)
+> or globally (`npm install -g techybara`) for a durable setup, then re-run `init`.
 
 That's the whole setup. `init` is additive and idempotent — it:
 
@@ -100,8 +111,10 @@ That's the whole setup. `init` is additive and idempotent — it:
 - writes a default config to `.techybara/config.json` (kept if one already exists),
 - adds `.techybara/` to your `.gitignore`.
 
-> Upgrading from 0.1.x? Re-run `npx techybara init` to add the verification
-> hooks. `techybara status` will tell you if you still need to.
+> Upgrading from an older version? Re-run `npx techybara init`. It upgrades legacy
+> hook entries in place (including the older shell-form command hooks) without
+> duplicating them. `techybara status` will tell you if you still need to, and
+> flags any stale, misplaced, or non-durable hooks.
 
 Preview every change without writing anything:
 

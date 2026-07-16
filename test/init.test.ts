@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { init } from "../src/init.js";
 
+// An external (recognizably-TechyBara) install path — not under the temp cwd,
+// and never the developer's global install.
 const CLI = "C:/somewhere/techybara/dist/cli.js";
 
 let dir: string;
@@ -18,18 +20,26 @@ afterEach(() => {
 function readSettings(): any {
   return JSON.parse(readFileSync(join(dir, ".claude", "settings.json"), "utf8"));
 }
+/** Our exec-form handlers under an event (command === "node"). */
+function ourEntries(event: string): any[] {
+  return (readSettings().hooks?.[event] ?? [])
+    .flatMap((g: any) => g.hooks ?? [])
+    .filter((h: any) => h.command === "node");
+}
 
 describe("init on a fresh project", () => {
-  it("writes settings, config, and gitignore", () => {
+  it("writes exec-form settings, config, and gitignore", () => {
     const res = init({ cwd: dir, cliPath: CLI, dryRun: false });
     expect(res.wrote).toBe(true);
     expect(res.error).toBeUndefined();
 
     const settings = readSettings();
-    expect(settings.hooks.SessionStart).toHaveLength(1);
-    expect(settings.hooks.Stop).toHaveLength(1);
-    expect(settings.hooks.SessionStart[0].hooks[0].command).toContain("snapshot");
-    expect(settings.hooks.Stop[0].hooks[0].command).toContain("report --hook");
+    const start = settings.hooks.SessionStart[0].hooks[0];
+    expect(start.type).toBe("command");
+    expect(start.command).toBe("node");
+    expect(start.args).toEqual([CLI, "snapshot"]);
+    expect(start.timeout).toBe(10);
+    expect(settings.hooks.Stop[0].hooks[0].args).toEqual([CLI, "report", "--hook"]);
 
     const config = JSON.parse(readFileSync(join(dir, ".techybara", "config.json"), "utf8"));
     expect(config.protectedPaths).toContain(".env");
@@ -51,10 +61,8 @@ describe("idempotency", () => {
   it("refreshes the CLI path if the install moved", () => {
     init({ cwd: dir, cliPath: "C:/old/techybara/dist/cli.js", dryRun: false });
     init({ cwd: dir, cliPath: "C:/new/techybara/dist/cli.js", dryRun: false });
-    const settings = readSettings();
-    expect(settings.hooks.SessionStart).toHaveLength(1);
-    expect(settings.hooks.SessionStart[0].hooks[0].command).toContain("C:/new/");
-    expect(settings.hooks.SessionStart[0].hooks[0].command).not.toContain("C:/old/");
+    expect(ourEntries("SessionStart")).toHaveLength(1);
+    expect(ourEntries("SessionStart")[0].args[0]).toBe("C:/new/techybara/dist/cli.js");
   });
 
   it("does not append .techybara/ twice to .gitignore", () => {
@@ -83,10 +91,11 @@ describe("preserving existing settings", () => {
     const settings = readSettings();
 
     expect(settings.model).toBe("claude-opus-4-8");
-    // user's Stop hook preserved, plus ours appended
-    const stopCommands = settings.hooks.Stop.flatMap((g: any) => g.hooks.map((h: any) => h.command));
-    expect(stopCommands).toContain("echo user-hook");
-    expect(stopCommands.some((c: string) => c.includes("report --hook"))).toBe(true);
+    // user's shell-form Stop hook preserved verbatim...
+    const rawStop = settings.hooks.Stop.flatMap((g: any) => g.hooks);
+    expect(rawStop.some((h: any) => h.command === "echo user-hook")).toBe(true);
+    // ...plus ours appended in exec form.
+    expect(ourEntries("Stop")[0].args).toEqual([CLI, "report", "--hook"]);
   });
 });
 
