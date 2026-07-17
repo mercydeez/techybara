@@ -11,6 +11,7 @@ import type { SessionDelta } from "../core/diff.js";
 import { VERSION } from "../version.js";
 import { summarize, type Receipt } from "./receipt.js";
 import type { ReportRunResult } from "./run.js";
+import type { CompletionEvaluation } from "./contract.js";
 
 export const REPORT_SCHEMA_VERSION = 1;
 
@@ -76,6 +77,7 @@ export interface JsonReport {
   turnNumber?: number;
   turn?: JsonDelta;
   session?: JsonDelta;
+  completion?: CompletionEvaluation;
   verification?: {
     /** Worst outcome per category, for the latest turn. */
     turn: JsonVerification[];
@@ -104,6 +106,7 @@ export function buildJsonReport(
   if (res.turnNumber !== undefined) doc.turnNumber = res.turnNumber;
   if (res.turn) doc.turn = toJsonDelta(res.turn);
   if (res.session) doc.session = toJsonDelta(res.session);
+  if (res.completion) doc.completion = res.completion;
   if (res.turnReceipts && res.sessionReceipts) {
     doc.verification = {
       turn: toJsonReceipts(res.turnReceipts),

@@ -52,6 +52,7 @@ describe("JSON report schema", () => {
 
     expect(Object.keys(doc).sort()).toEqual([
       "baselineAt",
+      "completion",
       "generatedAt",
       "schemaVersion",
       "session",

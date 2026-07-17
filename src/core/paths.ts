@@ -14,6 +14,11 @@ export function sessionsDir(top: string): string {
   return join(stateDir(top), "sessions");
 }
 
+/** Most recently started session, used by manual report/verify commands. */
+export function activeSessionPath(top: string): string {
+  return join(stateDir(top), "active-session.json");
+}
+
 /** Session ids come from Claude Code (uuids), but sanitize defensively. */
 export function safeSessionId(sessionId: string): string {
   const cleaned = sessionId.replace(/[^A-Za-z0-9._-]/g, "_");
@@ -41,6 +46,11 @@ export function reportPath(top: string, sessionId: string): string {
 
 export function reportStatePath(top: string, sessionId: string): string {
   return join(sessionDir(top, sessionId), "last-reported.json");
+}
+
+/** Pending completion-contract requirements for one session. */
+export function contractStatePath(top: string, sessionId: string): string {
+  return join(sessionDir(top, sessionId), "contract.json");
 }
 
 /** Snapshot of the working tree at the end of the last fully-processed turn. */

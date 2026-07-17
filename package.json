@@ -1,7 +1,7 @@
 {
   "name": "techybara",
   "version": "0.2.1",
-  "description": "Local-first evidence of what differs after a Claude Code session.",
+  "description": "Local-first evidence and completion contracts for Claude Code sessions.",
   "type": "module",
   "bin": {
     "techybara": "dist/cli.js"
@@ -34,7 +34,9 @@
     "git",
     "diff",
     "hooks",
-    "local-first"
+    "local-first",
+    "ai-agents",
+    "completion-contracts"
   ],
   "repository": {
     "type": "git",

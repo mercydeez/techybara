@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
 import { diagnoseHooks, init, uninstall } from "./init.js";
+import { loadConfig, VERIFICATION_CATEGORIES, writeRequiredChecks } from "./config.js";
 import {
   assertSafeStatePath,
   ensureSafeStateDirectory,
@@ -10,6 +11,7 @@ import {
 } from "./core/fsutil.js";
 import { errorLogPath, safeSessionId, stateDir } from "./core/paths.js";
 import { writeBaseline } from "./core/snapshot.js";
+import { readActiveSession, writeActiveSession } from "./core/session.js";
 import { gitAvailable, getToplevel } from "./core/git.js";
 import {
   emitSystemMessage,
@@ -18,7 +20,7 @@ import {
   readHookInput,
 } from "./hooks/adapter.js";
 import { runReport } from "./report/run.js";
-import { classifyCommand, writeReceipt } from "./report/receipt.js";
+import { classifyCommand, writeReceipt, type VerificationCategory } from "./report/receipt.js";
 import { buildJsonError, buildJsonReport } from "./report/json.js";
 
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
@@ -30,6 +32,8 @@ Usage:
   techybara report [--hook]      Show what changed since the baseline (run by the Stop hook)
   techybara report --json        Same, as machine-readable JSON on stdout (for agents and CI)
   techybara receipt --ok|--fail  Record an observed verification (run by the PostToolUse hooks)
+  techybara contract [options]   Configure required evidence (test, typecheck, lint, build, format, package)
+  techybara verify [--json]      Check the active session contract; exits 1 when incomplete
   techybara status               Explain whether TechyBara can run here (git present, in a repo, etc.)
 
 Flags:
@@ -38,7 +42,15 @@ Flags:
 
 TechyBara is local-first and never makes network calls.`;
 
-type CommandName = "init" | "uninstall" | "snapshot" | "report" | "receipt" | "status";
+type CommandName =
+  | "init"
+  | "uninstall"
+  | "snapshot"
+  | "report"
+  | "receipt"
+  | "contract"
+  | "verify"
+  | "status";
 
 const COMMANDS: readonly CommandName[] = [
   "init",
@@ -46,6 +58,8 @@ const COMMANDS: readonly CommandName[] = [
   "snapshot",
   "report",
   "receipt",
+  "contract",
+  "verify",
   "status",
 ];
 
@@ -84,6 +98,10 @@ export async function run(argv: readonly string[]): Promise<number> {
       return cmdReport(rest);
     case "receipt":
       return cmdReceipt(rest);
+    case "contract":
+      return cmdContract(rest);
+    case "verify":
+      return cmdVerify(rest);
     case "status":
       return cmdStatus();
   }
@@ -148,6 +166,7 @@ async function snapshotBody(args: readonly string[]): Promise<number> {
       hook?.sessionId ?? flagValue(args, "--session") ?? "manual",
     );
     const outcome = await writeBaseline(cwd, sessionId);
+    if (outcome.status !== "not-a-repo") writeActiveSession(outcome.top, sessionId);
     if (!isHook) {
       switch (outcome.status) {
         case "written": {
@@ -309,7 +328,9 @@ async function reportBody(args: readonly string[], json: boolean): Promise<numbe
   const hook = input.status === "payload" ? input.payload : null;
   const isHook = !json && (hook !== null || args.includes("--hook"));
   const cwd = hook?.cwd ?? process.cwd();
-  const sessionId = safeSessionId(hook?.sessionId ?? fallbackSessionId);
+  const sessionId = hook?.sessionId
+    ? safeSessionId(hook.sessionId)
+    : await resolveSessionId(cwd, flagValue(args, "--session"));
   try {
     // Manual runs are read-only w.r.t. suppression state: a user debugging with
     // `techybara report` must not silence the next automatic hook banner, or
@@ -379,6 +400,152 @@ async function reportBody(args: readonly string[], json: boolean): Promise<numbe
   }
 }
 
+async function resolveSessionId(cwd: string, explicit?: string): Promise<string> {
+  if (explicit) return safeSessionId(explicit);
+  const top = await getToplevel(cwd);
+  return top ? (readActiveSession(top) ?? "manual") : "manual";
+}
+
+function invalidFlags(
+  args: readonly string[],
+  valueFlags: readonly string[],
+  booleanFlags: readonly string[],
+): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (booleanFlags.includes(arg)) continue;
+    if (valueFlags.includes(arg)) {
+      if (i + 1 >= args.length || args[i + 1]!.startsWith("--")) return arg;
+      i++;
+      continue;
+    }
+    return arg;
+  }
+  return null;
+}
+
+async function cmdContract(args: readonly string[]): Promise<number> {
+  const invalid = invalidFlags(args, ["--require"], ["--clear"]);
+  if (invalid || (args.includes("--clear") && args.includes("--require"))) {
+    process.stderr.write(
+      `techybara: usage: techybara contract [--require test,typecheck,... | --clear]\n`,
+    );
+    return 2;
+  }
+
+  const top = await getToplevel(process.cwd());
+  if (!top) {
+    process.stderr.write(`techybara: not a git repository\n`);
+    return 2;
+  }
+
+  if (args.length === 0) {
+    const required = loadConfig(top).requiredChecks;
+    process.stdout.write(
+      required.length > 0
+        ? `Completion contract requires: ${required.join(", ")}\n`
+        : `Completion contract is disabled. Configure it with: techybara contract --require test,typecheck\n`,
+    );
+    return 0;
+  }
+
+  let required: VerificationCategory[] = [];
+  if (!args.includes("--clear")) {
+    const raw = flagValue(args, "--require") ?? "";
+    const values = raw.split(",").map((item) => item.trim()).filter(Boolean);
+    if (
+      values.length === 0 ||
+      values.some(
+        (item) => !(VERIFICATION_CATEGORIES as readonly string[]).includes(item),
+      )
+    ) {
+      process.stderr.write(
+        `techybara: required checks must be comma-separated values from: ${VERIFICATION_CATEGORIES.join(", ")}\n`,
+      );
+      return 2;
+    }
+    required = [...new Set(values)] as VerificationCategory[];
+  }
+
+  try {
+    writeRequiredChecks(top, required);
+  } catch (err) {
+    process.stderr.write(`techybara: could not update completion contract: ${String(err)}\n`);
+    return 1;
+  }
+
+  process.stdout.write(
+    required.length > 0
+      ? `🦫 Completion contract enabled: ${required.join(", ")}\n`
+      : `🦫 Completion contract disabled.\n`,
+  );
+  return 0;
+}
+
+async function cmdVerify(args: readonly string[]): Promise<number> {
+  const invalid = invalidFlags(args, ["--session"], ["--json"]);
+  if (invalid) {
+    process.stderr.write(`techybara: usage: techybara verify [--json] [--session <id>]\n`);
+    return 2;
+  }
+
+  const cwd = process.cwd();
+  const sessionId = await resolveSessionId(cwd, flagValue(args, "--session"));
+  const res = await runReport(cwd, sessionId, new Date(), { persistState: false });
+  const json = args.includes("--json");
+
+  if (json) {
+    process.stdout.write(
+      JSON.stringify(
+        buildJsonReport(res, sessionId, new Date().toISOString(), res.baselineAt),
+        null,
+        2,
+      ) + "\n",
+    );
+  }
+
+  if (
+    res.status === "not-a-repo" ||
+    res.status === "git-unavailable" ||
+    res.status === "baseline-missing" ||
+    res.status === "concurrent" ||
+    !res.completion
+  ) {
+    if (!json) {
+      process.stderr.write(`techybara: cannot evaluate the active session (${res.status})\n`);
+    }
+    return 2;
+  }
+
+  const completion = res.completion;
+  if (completion.status === "not-configured") {
+    if (!json) {
+      process.stderr.write(
+        `techybara: completion contract is not configured; run: techybara contract --require test,typecheck\n`,
+      );
+    }
+    return 2;
+  }
+  if (completion.status === "not-applicable") {
+    if (!json) process.stdout.write(`○ Completion contract not applicable — no session changes.\n`);
+    return 0;
+  }
+  if (completion.status === "complete") {
+    if (!json) {
+      process.stdout.write(`✓ Completion contract complete — ${completion.required.join(", ")}\n`);
+    }
+    return 0;
+  }
+
+  if (!json) {
+    const reason = completion.evidencePartial
+      ? "evidence is partial"
+      : `missing: ${completion.pending.join(", ")}`;
+    process.stdout.write(`✗ Completion contract incomplete — ${reason}\n`);
+  }
+  return 1;
+}
+
 /** Manual diagnostic: can TechyBara run here, and are the hooks healthy? */
 async function cmdStatus(): Promise<number> {
   const cwd = process.cwd();
@@ -393,6 +560,16 @@ async function cmdStatus(): Promise<number> {
   const lines: string[] = [`TechyBara ${VERSION}`];
   lines.push(`  git:    ${hasGit ? "available" : "NOT FOUND — TechyBara cannot verify anything"}`);
   lines.push(`  repo:   ${top ?? "not a git repository — hooks will safely no-op"}`);
+  const required = top ? loadConfig(top).requiredChecks : [];
+  lines.push(
+    `  contract: ${
+      top
+        ? required.length > 0
+          ? `requires ${required.join(", ")}`
+          : "disabled (optional: techybara contract --require test,typecheck)"
+        : "not available outside a repository"
+    }`,
+  );
   if (diag.healthy) {
     const where = diag.target.durability === "project-local" ? "project-local, durable" : "external install";
     lines.push(`  hooks:  installed and healthy (${where})`);
@@ -446,6 +623,9 @@ function cmdInit(args: readonly string[]): number {
     process.stdout.write(`\nRe-run without --dry-run to apply.\n`);
   } else {
     process.stdout.write(`\n🦫 Done. TechyBara will report changes after each Claude Code turn.\n`);
+    process.stdout.write(
+      `Optional completion gate: techybara contract --require test,typecheck\n`,
+    );
   }
   return 0;
 }

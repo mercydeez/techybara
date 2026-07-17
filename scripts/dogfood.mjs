@@ -9,7 +9,7 @@
 //
 // Zero dependencies, mirroring scripts/verify-pack.mjs: collect into `errors`,
 // print a bullet list, exit 1. Every temp artifact is removed in a finally.
-import { execFileSync, execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -183,6 +183,12 @@ try {
     argsOf("SessionStart").every((a) => a.every((tok) => !/["']/.test(tok))),
     JSON.stringify(argsOf("SessionStart")),
   );
+  const defaultConfig = JSON.parse(readFileSync(join(repo, ".techybara", "config.json"), "utf8"));
+  check("completion contracts are opt-in by default", Array.isArray(defaultConfig.requiredChecks) && defaultConfig.requiredChecks.length === 0);
+  tb(["contract", "--require", "test,typecheck"]);
+  const contractedConfig = JSON.parse(readFileSync(join(repo, ".techybara", "config.json"), "utf8"));
+  check("contract command configures required checks", eq(contractedConfig.requiredChecks, ["test", "typecheck"]), JSON.stringify(contractedConfig));
+
   const statusOut = tb(["status"]);
   check("status reports hooks installed and healthy", /installed and healthy/.test(statusOut), statusOut);
 
@@ -201,6 +207,7 @@ try {
   check("turn 1 names its unit (files, not edits)", stop1.includes("Turn: 3 files changed (1 added, 2 modified)"), stop1);
   check("turn 1 shows session scope", stop1.includes("Session: 3 files differ from baseline"), stop1);
   check("turn 1 shows the passing test", stop1.includes("✓ test"), stop1);
+  check("turn 1 contract remains incomplete without typecheck", stop1.includes("Contract: ✗ incomplete") && stop1.includes("missing: typecheck"), stop1);
   check(
     "turn 1 surfaces the sensitive .env without implying a breach",
     stop1.includes("Sensitive paths changed this turn: .env") &&
@@ -269,6 +276,21 @@ try {
   check("the report explains WHY a ? is a ?", report7.includes("last stage of the pipeline"), report7.slice(0, 400));
   check("the stop line names the concise unknown reason", stop7.includes("? build (piped exit status)"), stop7);
   check("the stop line does not dump the long explanation", !stop7.includes("last stage of the pipeline"), stop7);
+
+  // A later no-edit turn can close the contract by running every pending check.
+  console.log("\ndogfood: turn 8 — complete the evidence contract");
+  tb(["receipt", "--ok"], bash("npm test"));
+  tb(["receipt", "--ok"], bash("npm run typecheck"));
+  const stop8 = tb(["report", "--hook"], { ...hookBase, hook_event_name: "Stop" });
+  check("standalone checks complete the contract", stop8.includes("Contract: ✓ complete (test, typecheck)"), stop8);
+  const verified = spawnSync(process.execPath, [cli, "verify", "--json"], {
+    cwd: repo,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  check("verify exits 0 for a complete active session", verified.status === 0, verified.stderr);
+  const verifiedDoc = JSON.parse(verified.stdout);
+  check("verify emits the portable completion verdict", verifiedDoc.completion?.status === "complete", verified.stdout);
 
   // --- 8. Non-verification commands leave nothing behind ---------------------
   const receiptsDir = join(repo, ".techybara", "sessions", SID, "receipts");
@@ -378,6 +400,11 @@ try {
     check("classifies package.json as a dependency change", pkg?.category === "dependency", JSON.stringify(pkg));
     check("flags .env as protected", doc.session.protectedPaths.includes(".env"));
     check("reports verification outcomes", Array.isArray(doc.verification?.session));
+    check(
+      "a later package.json change resets the completion contract",
+      doc.completion?.status === "incomplete" && eq(doc.completion.pending, ["test", "typecheck"]),
+      JSON.stringify(doc.completion),
+    );
     check(
       "reports the harness-measured duration",
       doc.verification.session.some((v) => v.durationMs === 1234),

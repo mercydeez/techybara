@@ -33,7 +33,9 @@ const REQUIRED_DIST = [
   // receipts, risk classification, or the machine-readable report.
   "dist/report/receipt.js",
   "dist/report/json.js",
+  "dist/report/contract.js",
   "dist/core/category.js",
+  "dist/core/session.js",
 ];
 const MIN_DIST_JS = 10; // a nearly-empty dist/ must fail loudly, not ship silently
 

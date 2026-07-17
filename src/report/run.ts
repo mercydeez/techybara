@@ -41,6 +41,7 @@ import {
   type Receipt,
 } from "./receipt.js";
 import { renderMarkdown, renderOneLine } from "./render.js";
+import { evaluateContract, type CompletionEvaluation } from "./contract.js";
 
 /** Stored Markdown is a convenience artifact, not an unbounded evidence sink. */
 export const MAX_REPORT_FILE_BYTES = 1024 * 1024;
@@ -70,6 +71,8 @@ export interface ReportRunResult {
   turnReceipts?: Receipt[];
   /** Verification observed at any point in the session. */
   sessionReceipts?: Receipt[];
+  /** Configured completion requirements and their current evidence state. */
+  completion?: CompletionEvaluation;
 }
 
 export interface ReportOptions extends CaptureOptions {
@@ -204,6 +207,16 @@ async function reportLocked(
     );
   }
 
+  let completion = evaluateContract({
+    top,
+    sessionId,
+    required: config.requiredChecks,
+    turn,
+    session,
+    turnReceipts,
+    persist: persistState,
+  });
+
   const reportFileBytes = opts.maxReportBytes ?? MAX_REPORT_FILE_BYTES;
   const reportMeta = {
     sessionId,
@@ -212,6 +225,7 @@ async function reportLocked(
     turnNumber,
     turnReceipts,
     sessionReceipts,
+    completion,
   };
   let markdown = renderMarkdown(turn, session, reportMeta);
   if (Buffer.byteLength(markdown, "utf8") > reportFileBytes) {
@@ -220,6 +234,16 @@ async function reportLocked(
       session,
       `Stored Markdown exceeded ${reportFileBytes} bytes and was truncated.`,
     );
+    completion = evaluateContract({
+      top,
+      sessionId,
+      required: config.requiredChecks,
+      turn,
+      session,
+      turnReceipts,
+      persist: persistState,
+    });
+    reportMeta.completion = completion;
     markdown = boundMarkdown(renderMarkdown(turn, session, reportMeta), reportFileBytes);
   }
   ensureSafeStateDirectory(top, sessionDir(top, sessionId));
@@ -251,10 +275,11 @@ async function reportLocked(
     baselineAt: baseline.createdAt,
     turnReceipts,
     sessionReceipts,
+    completion,
     markdown,
   };
 
-  const oneLine = renderOneLine(turn, session, turnReceipts);
+  const oneLine = renderOneLine(turn, session, turnReceipts, completion);
   if (!oneLine) {
     // The tree is back at (or never left) the session baseline. Clear the
     // suppression fingerprint so a later re-divergence — even one identical to
@@ -272,7 +297,7 @@ async function reportLocked(
     return { ...result, status: "no-changes" };
   }
 
-  const fingerprint = suppressionFingerprint(session, turnReceipts);
+  const fingerprint = suppressionFingerprint(session, turnReceipts, completion);
   const statePath = reportStatePath(top, sessionId);
   assertSafeStatePath(top, statePath);
   const last = readLastFingerprint(statePath);
@@ -309,10 +334,15 @@ async function reportLocked(
  * is folded in here so a change in verification status re-reports even when the
  * file delta is byte-identical.
  */
-function suppressionFingerprint(session: SessionDelta, turnReceipts: readonly Receipt[]): string {
+function suppressionFingerprint(
+  session: SessionDelta,
+  turnReceipts: readonly Receipt[],
+  completion: CompletionEvaluation,
+): string {
   const material = JSON.stringify({
     delta: deltaFingerprint(session),
     verification: summarize(turnReceipts).map((s) => [s.category, s.outcome]),
+    completion: [completion.status, completion.pending, completion.evidencePartial],
   });
   return createHash("sha1").update(material).digest("hex");
 }
