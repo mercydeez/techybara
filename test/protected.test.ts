@@ -121,7 +121,7 @@ describe("flagship: gitignored .env change is caught and never leaked", () => {
       expect(output).not.toContain("exfiltrated_new_value");
       expect(output).not.toContain("SECRET=");
     }
-    expect(oneLine).toContain("protected: .env");
+    expect(oneLine).toContain("Sensitive paths changed this turn: .env");
   });
 
   it("does not flag an unchanged .env (no false positive)", async () => {

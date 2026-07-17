@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Clearer end-of-turn evidence.** The Stop message now explains why a
+  verification result is unknown, states when verification was not observed,
+  shows sensitive paths only when they changed in the latest turn, caps long
+  path lists, and gives an actionable `techybara report` follow-up. Sensitive
+  path warnings now say explicitly that contents are not retained or displayed
+  and are a
+  review cue rather than evidence of a breach.
+
 ## [0.2.1] - 2026-07-16
 
 ### Fixed

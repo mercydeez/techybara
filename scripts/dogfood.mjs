@@ -201,7 +201,12 @@ try {
   check("turn 1 names its unit (files, not edits)", stop1.includes("Turn: 3 files changed (1 added, 2 modified)"), stop1);
   check("turn 1 shows session scope", stop1.includes("Session: 3 files differ from baseline"), stop1);
   check("turn 1 shows the passing test", stop1.includes("✓ test"), stop1);
-  check("turn 1 surfaces the protected .env", stop1.includes("protected: .env"), stop1);
+  check(
+    "turn 1 surfaces the sensitive .env without implying a breach",
+    stop1.includes("Sensitive paths changed this turn: .env") &&
+      stop1.includes("contents are not retained or shown"),
+    stop1,
+  );
   check("banner never leaks the secret", !stop1.includes("exfiltrated_new_value"), stop1);
 
   // --- 5. Turn 2: only one new file, and the test now fails ------------------
@@ -258,10 +263,12 @@ try {
   check("a piped command is still NOT trusted", !stop7.includes("✓ build"), stop7);
   check("a piped command is reported unverified", stop7.includes("? build"), stop7);
 
-  // The reason belongs in the detailed report, never in the compact stop line.
-  const report6 = readFileSync(join(repo, ".techybara", "sessions", SID, "report.md"), "utf8");
-  check("the report explains WHY a ? is a ?", report6.includes("piped"), report6.slice(0, 200));
-  check("the stop line stays compact (no reason inline)", !stop7.includes("piped-exit-status"), stop7);
+  // The Stop message names the concise reason; the detailed report carries the
+  // full explanation so the banner remains readable.
+  const report7 = readFileSync(join(repo, ".techybara", "sessions", SID, "report.md"), "utf8");
+  check("the report explains WHY a ? is a ?", report7.includes("last stage of the pipeline"), report7.slice(0, 400));
+  check("the stop line names the concise unknown reason", stop7.includes("? build (piped exit status)"), stop7);
+  check("the stop line does not dump the long explanation", !stop7.includes("last stage of the pipeline"), stop7);
 
   // --- 8. Non-verification commands leave nothing behind ---------------------
   const receiptsDir = join(repo, ".techybara", "sessions", SID, "receipts");

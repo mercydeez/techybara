@@ -1,5 +1,5 @@
 // Rendering: turn a turn delta + session delta + verification receipts into
-// (a) a one-line summary for the Stop hook's systemMessage, and (b) a full
+// (a) a compact summary for the Stop hook's systemMessage, and (b) a full
 // markdown report written to disk.
 import type { FileCategory } from "../core/category.js";
 import type { SessionDelta } from "../core/diff.js";
@@ -12,11 +12,33 @@ const OUTCOME_MARK: Record<VerificationOutcome, string> = {
   unknown: "?",
 };
 
-/** e.g. "✓ tests · ✗ lint". Empty when nothing was observed. */
+const UNKNOWN_REASON_SHORT: Record<UnknownReason, string> = {
+  "piped-exit-status": "piped exit status",
+  "masked-exit-status": "exit status may be masked",
+  interrupted: "interrupted before completion",
+  "unconfirmed-shell": "shell source unconfirmed",
+};
+
+/** e.g. "✓ test · ? typecheck (piped exit status)". */
 function receiptsFragment(receipts: readonly Receipt[]): string {
   return summarize(receipts)
-    .map((s) => `${OUTCOME_MARK[s.outcome]} ${s.category}`)
+    .map((s) => {
+      const reason =
+        s.outcome === "unknown"
+          ? ` (${s.reason ? UNKNOWN_REASON_SHORT[s.reason] : "reason unavailable"})`
+          : "";
+      return `${OUTCOME_MARK[s.outcome]} ${s.category}${reason}`;
+    })
     .join(" · ");
+}
+
+const MAX_INLINE_PATHS = 3;
+
+/** Keep the Stop message readable even when many sensitive paths changed. */
+function inlinePaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, MAX_INLINE_PATHS);
+  const remaining = paths.length - shown.length;
+  return `${shown.join(", ")}${remaining > 0 ? ` (+${remaining} more)` : ""}`;
 }
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -43,7 +65,7 @@ function describeChanges(d: SessionDelta): string {
   return `${plural(total, "file")} changed (${present.map(([n, l]) => `${n} ${l}`).join(", ")})`;
 }
 
-/** One-line summary for the in-session message. */
+/** Compact, actionable summary for the in-session Stop message. */
 export function renderOneLine(
   turn: SessionDelta,
   session: SessionDelta,
@@ -70,10 +92,17 @@ export function renderOneLine(
         } from baseline`;
 
   const verification = receiptsFragment(turnReceipts);
-  if (verification) line += ` · ${verification}`;
+  if (verification) {
+    line += ` · Verification: ${verification}`;
+  } else if (turn.changes.length > 0) {
+    line += ` · Verification: not observed`;
+  }
 
-  if (session.protectedPaths.length > 0) {
-    line += ` · ⚠️ protected: ${session.protectedPaths.join(", ")}`;
+  // Only repeat sensitive paths when they changed in THIS turn. The complete
+  // session-wide list remains in `techybara report`; repeating it on every later
+  // turn creates alert fatigue and makes a stale warning look newly urgent.
+  if (turn.protectedPaths.length > 0) {
+    line += ` · ⚠️ Sensitive paths changed this turn: ${inlinePaths(turn.protectedPaths)}`;
   }
   if (session.headChanged) {
     line += ` · ⚠️ history moved`;
@@ -81,9 +110,24 @@ export function renderOneLine(
   if (partial) {
     // A degraded delta is a partial verification; say so plainly rather than
     // dressing it up as a normal success.
-    return `🦫 ⚠️ Partial report — ${line.replace(/^🦫 /, "")} · verification limited`;
+    line = `🦫 ⚠️ Partial report — ${line.replace(/^🦫 /, "")} · verification limited`;
   }
-  return line;
+
+  const outcomes = summarize(turnReceipts);
+  const next: string[] = [];
+  if (outcomes.some((s) => s.outcome === "fail")) next.push("review failed checks");
+  if (outcomes.some((s) => s.outcome === "unknown")) {
+    next.push("re-run unknown checks as standalone commands");
+  }
+  if (turn.protectedPaths.length > 0) {
+    next.push("review sensitive-path changes (contents are not retained or shown)");
+  }
+  if (session.headChanged) next.push("review Git history movement");
+  if (partial) next.push("review the partial-report notes");
+
+  return next.length > 0
+    ? `${line}\n↳ Next: ${next.join("; ")} · Details: \`techybara report\``
+    : line;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -146,7 +190,9 @@ export function renderMarkdown(
 
   const one = renderOneLine(turn, session, meta.turnReceipts);
   if (one) {
-    lines.push(`**${one}**`);
+    const [summary = "", ...details] = one.split("\n");
+    lines.push(`**${summary}**`);
+    lines.push(...details);
     lines.push("");
   }
 
@@ -198,15 +244,16 @@ export function renderMarkdown(
   }
 
   if (session.protectedPaths.length > 0) {
-    lines.push(`## ⚠️ Protected paths changed`);
+    lines.push(`## ⚠️ Sensitive paths changed (contents kept private)`);
     lines.push("");
     for (const p of session.protectedPaths) {
       lines.push(`- \`${p}\``);
     }
     lines.push("");
-    lines.push(`> These paths match your protected-path patterns and **differ from the`);
-    lines.push(`> session baseline**. TechyBara reports that they changed — it never stores`);
-    lines.push(`> or displays their contents.`);
+    lines.push(`> These paths match your configured protected-path patterns and **differ`);
+    lines.push(`> from the session baseline**. This is a review cue, not evidence of a`);
+    lines.push(`> secret leak or security breach. TechyBara hashes file bytes to detect changes`);
+    lines.push(`> but never retains or displays their contents.`);
     lines.push("");
   }
 
@@ -275,7 +322,7 @@ function pushVerification(
   session: SessionDelta,
   meta: ReportMeta,
 ): void {
-  lines.push(`## Verification observed`);
+  lines.push(`## Verification evidence`);
   lines.push("");
 
   const summary = summarize(meta.turnReceipts);
@@ -335,7 +382,7 @@ function limitsFooter(): string {
     `your own edits, your IDE, and other processes are all included. It cannot see`,
     `changes made and reverted within a single turn. A \`success\` receipt means the`,
     `tool call exited cleanly, not that the tests were meaningful or complete. It`,
-    `never inspects, stores, or displays file contents, command output, or`,
+    `never retains or displays file contents, command output, or`,
     `environment values._`,
   ].join("\n");
 }

@@ -99,7 +99,7 @@ describe("committed-during-session changes (acceptance #1)", () => {
     const res = await runReport(dir, SID);
     expect(res.status).toBe("reported");
     expect(res.markdown).toContain("dist/signing.pem");
-    expect(res.markdown).toContain("Protected paths changed");
+    expect(res.markdown).toContain("Sensitive paths changed (contents kept private)");
   });
 
   it("reports a file deleted and committed during the session", async () => {

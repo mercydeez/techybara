@@ -40,10 +40,12 @@ change. TechyBara watches those paths directly.
 
 ## What it looks like
 
-After a turn that changed files, you'll see a single line:
+After a routine successful turn, you'll see one compact line. Actionable evidence
+adds a second line with the next step:
 
 ```text
-🦫 Turn: 3 files changed (1 added, 2 modified) · Session: 7 files differ from baseline · ✓ test · ⚠️ protected: .env
+🦫 Turn: 3 files changed (1 added, 2 modified) · Session: 7 files differ from baseline · Verification: ? test (piped exit status) · ⚠️ Sensitive paths changed this turn: .env
+↳ Next: re-run unknown checks as standalone commands; review sensitive-path changes (contents are not retained or shown) · Details: `techybara report`
 ```
 
 Every count is **distinct files** — never edits, hunks, or lines:
@@ -62,8 +64,14 @@ Then what was actually verified, and what needs attention:
 | `✗ test` | The harness reported it as failing. |
 | `? test` | It ran, but **no trustworthy result** — e.g. a pipe took the exit status. **Not a failure.** |
 
-`techybara report` says *why* any `?` is a `?`. TechyBara never reads the agent's
-prose to decide these — only which lifecycle event the harness fired.
+The Stop message says *why* any `?` is a `?`; `techybara report` carries the
+full evidence. Sensitive paths appear in the compact message only when they
+changed in the latest turn, while the detailed report retains the full
+session-wide list. A sensitive-path warning is a review cue, not evidence of a
+breach. TechyBara hashes file bytes to detect changes, but never retains or
+shows their contents. It also never reads
+the agent's prose to decide outcomes — only which lifecycle event the harness
+fired.
 
 A turn that TechyBara fully verified and found unchanged produces **no output**.
 Silence means "checked, nothing differs" — not "didn't look." If verification is
