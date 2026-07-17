@@ -14,14 +14,15 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#feedback)
 
-**See what a Claude Code session actually changed — automatically, after every turn.**
+**Do not trust the agent summary. Verify the run.**
 
 </div>
 
 ---
 
-TechyBara runs after each Claude Code response and records end-state evidence from
-**git and the filesystem** — it never takes the agent's prose as evidence — and
+TechyBara is a local evidence layer for Claude Code. After each response it records
+end-state evidence from **git, the filesystem, and tool lifecycle events** — it never
+uses the agent's prose as evidence — and
 tells you which files differ from the session baseline, not
 just what was already dirty when the session began. It makes no network calls at
 runtime, never shows file contents, and never blocks your session. Complete,
@@ -91,6 +92,8 @@ only partial (see the limits below), you get a visible ⚠️ instead of silence
   whether Claude Code reported them succeeding. Observed from the tool result,
   never taken on trust from what Claude said.
 - **Was verification complete?** — and if not, you're told so plainly.
+- **Did the run satisfy your evidence contract?** — configured checks stay pending
+  after a change until TechyBara observes trustworthy successes for all of them.
 
 ## Install
 
@@ -142,6 +145,9 @@ complete unchanged turns with no failed/ambiguous verification stay silent.
 | `techybara status` | Report whether TechyBara can run here: git present, inside a repo, hooks installed. |
 | `techybara report` | Print the full Markdown report for the current session. |
 | `techybara report --json` | Same, as machine-readable JSON for agents and CI. See [the schema](docs/report-schema.md). |
+| `techybara contract --require test,typecheck` | Require trustworthy evidence after every new change. |
+| `techybara contract --clear` | Disable the completion contract without changing other config. |
+| `techybara verify [--json]` | Evaluate the active session contract; exits `1` when incomplete and `2` when not configured/evaluable. |
 | `techybara snapshot` | Capture a baseline manually (normally run for you by the `SessionStart` hook). |
 | `techybara receipt --ok\|--fail` | Record an observed verification (run for you by the `PostToolUse` hooks). |
 
@@ -151,6 +157,32 @@ The full report for each session is also written to
 Running `techybara report` by hand is safe to repeat: it refreshes
 `report.md`, but it never advances the turn checkpoint and never consumes the
 repeat-suppression fingerprint, so it cannot silence the next automatic banner.
+Without `--session`, manual `report` and `verify` commands use the most recently
+started Claude Code session in the repository.
+
+## Completion contracts
+
+A receipt says a check ran. A completion contract turns those receipts into an
+actionable gate:
+
+```bash
+techybara contract --require test,typecheck,build
+techybara verify
+```
+
+Any new file change or Git history movement resets every configured requirement.
+A trustworthy success clears its category; failure, interruption, a masked exit,
+or a missing check leaves it pending. Required checks can be rerun in a later
+no-edit turn, so the contract does not force artificial file changes. If the
+underlying comparison is partial, the contract cannot claim completion.
+
+Contracts are deliberately opt-in: TechyBara cannot know whether every repository
+has tests, a type checker, or a build. The available categories are `test`,
+`typecheck`, `lint`, `build`, `format`, and `package`.
+
+`techybara verify --json` emits the same portable report document as
+`report --json`, including the `completion` verdict, while using process exit
+codes suitable for local gates and automation.
 
 ## Coverage
 
@@ -306,7 +338,8 @@ Everything TechyBara persists, and nothing else:
 
 | Path | Contents |
 | --- | --- |
-| `config.json` | Your configuration. |
+| `config.json` | Your configuration, including optional required checks. |
+| `active-session.json` | Bounded pointer to the most recently started session; no prompt or source content. |
 | `error.log` | Bounded timestamped internal errors, so a failure is never silent. |
 | `sessions/<id>/baseline.json` | Per-path git status codes and **blob hashes** as of session start. Hashes, never bytes. |
 | `sessions/<id>/checkpoint.json` | The same shape, as of the end of the last turn, plus a turn counter. |
@@ -314,6 +347,7 @@ Everything TechyBara persists, and nothing else:
 | `sessions/<id>/receipts-truncated` | Sticky marker that receipt retention hit its cap; later reports remain visibly partial. |
 | `sessions/<id>/report.md` | The bounded rendered human report — paths and change kinds. |
 | `sessions/<id>/last-reported.json` | A single hash used to suppress repeat banners. |
+| `sessions/<id>/contract.json` | Required categories still pending after the latest session change. |
 
 The dogfood harness sweeps this whole directory for secret values, command text,
 and file contents on every CI run, on Linux and Windows. If you find something in
@@ -343,7 +377,8 @@ out of the box:
   ],
   "ignorePaths": [".git/**", "node_modules/**", ".techybara/**", "dist/**", "build/**"],
   "maxFileSizeMB": 5,
-  "maxFiles": 2000
+  "maxFiles": 2000,
+  "requiredChecks": []
 }
 ```
 
@@ -356,6 +391,8 @@ out of the box:
 - **`maxFiles`** — above this many changed files, TechyBara degrades to a
   status-only summary instead of hashing everything (keeps hooks fast on huge trees).
   Degraded turns are marked *Partial* — never silent.
+- **`requiredChecks`** — optional completion contract. Configure it safely with
+  `techybara contract --require test,typecheck` rather than editing JSON by hand.
 - **`maxFileSizeMB`** — non-protected files larger than this are noted as changed
   using size+mtime instead of a content hash. This is partial evidence and is
   reported as such.
@@ -388,6 +425,9 @@ Stop hook
 Compare ONE capture against TWO baselines
     ├── vs. checkpoint.json  →  what changed this turn
     └── vs. baseline.json    →  what changed this session
+    │
+    ▼
+Evaluate completion contract → complete or pending required checks
     │
     ▼
     ├── No verified changes  →  silent

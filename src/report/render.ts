@@ -4,6 +4,7 @@
 import type { FileCategory } from "../core/category.js";
 import type { SessionDelta } from "../core/diff.js";
 import type { Receipt, UnknownReason, VerificationOutcome } from "./receipt.js";
+import type { CompletionEvaluation } from "./contract.js";
 import { summarize } from "./receipt.js";
 
 const OUTCOME_MARK: Record<VerificationOutcome, string> = {
@@ -70,6 +71,7 @@ export function renderOneLine(
   turn: SessionDelta,
   session: SessionDelta,
   turnReceipts: readonly Receipt[] = [],
+  completion?: CompletionEvaluation,
 ): string | null {
   const partial = turn.degraded || session.degraded;
   const hasUnverifiedReceipt = turnReceipts.some((receipt) => receipt.outcome !== "success");
@@ -90,6 +92,15 @@ export function renderOneLine(
       : ` · Session: ${plural(session.changes.length, "file")} ${
           session.changes.length === 1 ? "differs" : "differ"
         } from baseline`;
+
+  if (completion?.status === "complete") {
+    line += ` · Contract: ✓ complete (${completion.required.join(", ")})`;
+  } else if (completion?.status === "incomplete") {
+    const reason = completion.evidencePartial
+      ? "evidence is partial"
+      : `missing: ${completion.pending.join(", ")}`;
+    line += ` · Contract: ✗ incomplete — ${reason}`;
+  }
 
   const verification = receiptsFragment(turnReceipts);
   if (verification) {
@@ -124,6 +135,9 @@ export function renderOneLine(
   }
   if (session.headChanged) next.push("review Git history movement");
   if (partial) next.push("review the partial-report notes");
+  if (completion?.status === "incomplete" && completion.pending.length > 0) {
+    next.push(`run required checks: ${completion.pending.join(", ")}`);
+  }
 
   return next.length > 0
     ? `${line}\n↳ Next: ${next.join("; ")} · Details: \`techybara report\``
@@ -172,6 +186,7 @@ export interface ReportMeta {
   turnNumber: number;
   turnReceipts: readonly Receipt[];
   sessionReceipts: readonly Receipt[];
+  completion?: CompletionEvaluation;
 }
 
 export function renderMarkdown(
@@ -188,7 +203,7 @@ export function renderMarkdown(
   lines.push(`- Report generated: ${meta.generatedAt}`);
   lines.push("");
 
-  const one = renderOneLine(turn, session, meta.turnReceipts);
+  const one = renderOneLine(turn, session, meta.turnReceipts, meta.completion);
   if (one) {
     const [summary = "", ...details] = one.split("\n");
     lines.push(`**${summary}**`);
@@ -316,12 +331,36 @@ const REASON_TEXT: Record<UnknownReason, string> = {
     "the command could not be confirmed as coming from the Bash tool, and the shell rules used here are POSIX-specific",
 };
 
+function pushCompletion(lines: string[], completion?: CompletionEvaluation): void {
+  if (!completion || completion.status === "not-configured") return;
+  lines.push(`## Completion contract`);
+  lines.push("");
+  if (completion.status === "not-applicable") {
+    lines.push(`Not applicable: no files currently differ from the session baseline.`);
+  } else if (completion.status === "complete") {
+    lines.push(`✅ Complete — trustworthy success observed for: ${completion.required.join(", ")}.`);
+  } else {
+    const pending = completion.pending.length > 0
+      ? `Pending: ${completion.pending.map((item) => `\`${item}\``).join(", ")}.`
+      : `All configured checks ran, but the underlying evidence is partial.`;
+    lines.push(`❌ Incomplete — ${pending}`);
+    if (completion.satisfied.length > 0) {
+      lines.push(`Satisfied since the latest change: ${completion.satisfied.join(", ")}.`);
+    }
+    lines.push("");
+    lines.push(`> A new file or history change resets every requirement. Only a standalone,`);
+    lines.push(`> trustworthy success clears one; failures, interrupted calls and masked exits do not.`);
+  }
+  lines.push("");
+}
+
 function pushVerification(
   lines: string[],
   turn: SessionDelta,
   session: SessionDelta,
   meta: ReportMeta,
 ): void {
+  pushCompletion(lines, meta.completion);
   lines.push(`## Verification evidence`);
   lines.push("");
 

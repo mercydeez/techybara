@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Completion contracts.** Projects can declare required verification categories
+  with `techybara contract --require test,typecheck,...`. Any new change resets
+  the requirements; only trustworthy successes clear them, and later no-edit
+  turns can finish the contract. `techybara verify [--json]` exposes a portable
+  verdict and exits non-zero when evidence is incomplete or not evaluable.
+- **Active-session discovery.** Manual `report`, `report --json`, and `verify`
+  commands now use the most recently started session by default, so the follow-up
+  command printed by a hook opens the evidence the user was actually shown.
+
 ### Changed
 - **Clearer end-of-turn evidence.** The Stop message now explains why a
   verification result is unknown, states when verification was not observed,

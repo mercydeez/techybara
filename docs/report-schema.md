@@ -1,6 +1,8 @@
 # `techybara report --json` — schema v1
 
 A stable, machine-readable view of one turn, for agent adapters and CI scripts.
+`techybara verify --json` emits this same shape and uses its process exit code as
+the completion gate (`0` complete/not applicable, `1` incomplete, `2` not evaluable).
 
 ```bash
 techybara report --json
@@ -49,6 +51,15 @@ on-disk state formats. It changes only when this shape changes incompatibly.
   "turnNumber": 3,
   "turn":    { "…": "delta object — see below" },
   "session": { "…": "delta object — see below" },
+  "completion": {
+    "status": "incomplete",
+    "required": ["test", "typecheck"],
+    "satisfied": ["test"],
+    "pending": ["typecheck"],
+    "failed": [],
+    "unknown": [],
+    "evidencePartial": false
+  },
   "verification": {
     "turn":    [{ "category": "test", "outcome": "success" }],
     "session": [{ "category": "test", "outcome": "fail" }],
@@ -70,6 +81,7 @@ on-disk state formats. It changes only when this shape changes incompatibly.
 | `turnNumber` | number? | 1-based index of the turn just processed. |
 | `turn` | delta? | Changes since the **previous turn** ended. |
 | `session` | delta? | Changes since the **session baseline**. |
+| `completion` | object? | Current completion-contract verdict. Absent if the run never got that far. |
 | `verification` | object? | Observed verification. Absent if the run never got that far. |
 | `error` | string? | Present only when `status` is `error`. |
 
@@ -132,6 +144,26 @@ network, no heuristics.
 
 There is deliberately no `safe` category and no approval field. TechyBara reports
 facts; it does not adjudicate them.
+
+### `completion`
+
+Completion contracts are optional and configured through `requiredChecks`. The
+object is still present with `status: "not-configured"` when report evaluation
+completed but no contract is enabled.
+
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| `status` | string | `not-configured` \| `not-applicable` \| `incomplete` \| `complete`. |
+| `required` | string[] | Configured categories in declaration order. |
+| `satisfied` | string[] | Requirements cleared by trustworthy successes since the latest change. |
+| `pending` | string[] | Requirements that still need trustworthy success evidence. |
+| `failed` | string[] | Required categories with failure evidence in the latest turn. |
+| `unknown` | string[] | Required categories with untrustworthy/unfinished evidence in the latest turn. |
+| `evidencePartial` | boolean | True when a partial comparison prevents a complete verdict. |
+
+Any new file change or Git history movement resets the requirements. Later
+standalone checks can clear them. Returning to the session baseline produces
+`not-applicable`; partial evidence can never produce `complete`.
 
 ### `verification`
 
