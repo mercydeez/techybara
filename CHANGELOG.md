@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-17
+
 ### Added
 - **Completion contracts.** Projects can declare required verification categories
   with `techybara contract --require test,typecheck,...`. Any new change resets
@@ -229,7 +231,8 @@ no change attribution, symlinks skipped in the protected scan, and more). See
 [What TechyBara cannot see](./README.md#what-techybara-cannot-see) rather than
 duplicating them here.
 
-[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mercydeez/techybara/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/mercydeez/techybara/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mercydeez/techybara/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/mercydeez/techybara/compare/v0.1.0...v0.1.1
