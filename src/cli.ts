@@ -238,7 +238,7 @@ async function receiptBody(args: readonly string[], ok: boolean): Promise<number
 
 /**
  * Stop hook (fires every turn): report what changed since the baseline. Emits a
- * one-line systemMessage only when something changed since the last report.
+ * compact systemMessage only when something changed since the last report.
  * Always exits 0 — critically, never 2, which would block Claude from stopping.
  */
 async function cmdReport(args: readonly string[]): Promise<number> {

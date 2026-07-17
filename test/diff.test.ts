@@ -180,7 +180,7 @@ describe("renderOneLine", () => {
     expect(renderOneLine(d, d)).toBeNull();
   });
 
-  it("summarizes turn counts, session total and protected paths", () => {
+  it("summarizes turn counts, session total and sensitive paths", () => {
     const d = computeDelta(snap({}), snap({ ".env": e("x", "??"), "a.txt": e("y", "??") }), {
       isProtected: (p) => p === ".env",
     });
@@ -188,7 +188,8 @@ describe("renderOneLine", () => {
     // Counts name their unit: files, not edits/hunks/lines.
     expect(line).toContain("Turn: 2 files added");
     expect(line).toContain("Session: 2 files differ from baseline");
-    expect(line).toContain("protected: .env");
+    expect(line).toContain("Sensitive paths changed this turn: .env");
+    expect(line).toContain("contents are not retained or shown");
   });
 
   it("distinguishes a quiet turn inside a busy session", () => {
@@ -219,6 +220,70 @@ describe("renderOneLine", () => {
     ])!;
     expect(line).toContain("✓ test");
     expect(line).toContain("✗ lint");
+  });
+
+  it("explains an unknown result and gives a concrete next action", () => {
+    const d = computeDelta(snap({}), snap({ "a.txt": e("y", "??") }));
+    const line = renderOneLine(d, d, [
+      {
+        version: 1,
+        category: "test",
+        outcome: "unknown",
+        reason: "piped-exit-status",
+        at: "2026-07-13T00:00:01.000Z",
+      },
+    ])!;
+    expect(line).toContain("? test (piped exit status)");
+    expect(line).toContain("re-run unknown checks as standalone commands");
+    expect(line).toContain("Details: `techybara report`");
+  });
+
+  it("explains legacy unknown receipts that have no stored reason", () => {
+    const d = computeDelta(snap({}), snap({ "a.txt": e("y", "??") }));
+    const line = renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "unknown", at: "2026-07-13T00:00:01.000Z" },
+    ])!;
+    expect(line).toContain("? test (reason unavailable)");
+  });
+
+  it("states when changed files had no observed verification", () => {
+    const d = computeDelta(snap({}), snap({ "a.txt": e("y", "??") }));
+    expect(renderOneLine(d, d)).toContain("Verification: not observed");
+  });
+
+  it("does not repeat sensitive paths changed only in an earlier turn", () => {
+    const turn = computeDelta(snap({}), snap({}));
+    const session = computeDelta(snap({}), snap({ ".env": e("x", "??") }), {
+      isProtected: (p) => p === ".env",
+    });
+    const line = renderOneLine(turn, session)!;
+    expect(line).not.toContain("Sensitive paths changed this turn");
+    expect(line).not.toContain(".env");
+  });
+
+  it("caps sensitive paths in the Stop message", () => {
+    const d = computeDelta(
+      snap({}),
+      snap({
+        ".env": e("1", "??"),
+        ".env.local": e("2", "??"),
+        "auth/key.pem": e("3", "??"),
+        ".github/workflows/ci.yml": e("4", "??"),
+      }),
+      { isProtected: () => true },
+    );
+    const line = renderOneLine(d, d)!;
+    expect(line).toContain("(+1 more)");
+    expect(line).not.toContain("auth/key.pem");
+  });
+
+  it("keeps a routine successful turn to one line", () => {
+    const d = computeDelta(snap({}), snap({ "a.txt": e("y", "??") }));
+    const line = renderOneLine(d, d, [
+      { version: 1, category: "test", outcome: "success", at: "2026-07-13T00:00:01.000Z" },
+    ])!;
+    expect(line).not.toContain("\n");
+    expect(line).toContain("Verification: ✓ test");
   });
 
   it("surfaces a failed check even when no files currently differ", () => {
@@ -271,11 +336,13 @@ describe("renderMarkdown", () => {
       { isProtected: (p) => p === ".env" },
     );
     const md = renderMarkdown(d, d, meta);
-    expect(md).toContain("Protected paths changed");
+    expect(md).toContain("Sensitive paths changed (contents kept private)");
     expect(md).toContain("`.env`");
     expect(md).toContain("Session changes by category");
     expect(md).toContain("Source (3)");
-    expect(md).toContain("never inspects, stores, or displays file contents");
+    expect(md).toContain("never retains or displays their contents");
+    expect(md).toContain("not evidence of a");
+    expect(md).toContain("security breach");
   });
 
   it("groups by risk category with factual wording, never 'safe'", () => {
