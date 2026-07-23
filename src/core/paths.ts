@@ -79,3 +79,18 @@ export function receiptsTruncatedPath(top: string, sessionId: string): string {
 export function errorLogPath(top: string): string {
   return join(stateDir(top), "error.log");
 }
+
+/** One v2 evidence file per named check — see report/evidence.ts. */
+export function evidenceDir(top: string, sessionId: string): string {
+  return join(sessionDir(top, sessionId), "evidence");
+}
+
+/**
+ * Deterministic filename from a hash of the checkId alone: a corrupt file can
+ * be associated with its check without parsing its JSON, and a removed or
+ * renamed check can never collide with another's evidence.
+ */
+export function evidencePath(top: string, sessionId: string, checkId: string): string {
+  const hash = createHash("sha256").update(checkId).digest("hex");
+  return join(evidenceDir(top, sessionId), `${hash}.json`);
+}

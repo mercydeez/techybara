@@ -3,7 +3,12 @@ import { appendFileSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
 import { diagnoseHooks, init, uninstall } from "./init.js";
-import { loadConfig, VERIFICATION_CATEGORIES, writeRequiredChecks } from "./config.js";
+import {
+  loadCheckDefinitions,
+  loadConfig,
+  VERIFICATION_CATEGORIES,
+  writeRequiredChecks,
+} from "./config.js";
 import {
   assertSafeStatePath,
   ensureSafeStateDirectory,
@@ -22,6 +27,8 @@ import {
 import { runReport } from "./report/run.js";
 import { classifyCommand, writeReceipt, type VerificationCategory } from "./report/receipt.js";
 import { buildJsonError, buildJsonReport } from "./report/json.js";
+import { runCheck } from "./report/execcheck.js";
+import { evaluateNamedChecks, type FreshnessResult, type FreshnessState } from "./report/freshness.js";
 
 const USAGE = `techybara ${VERSION} — see what a Claude Code session actually changed.
 
@@ -34,6 +41,8 @@ Usage:
   techybara receipt --ok|--fail  Record an observed verification (run by the PostToolUse hooks)
   techybara contract [options]   Configure required evidence (test, typecheck, lint, build, format, package)
   techybara verify [--json]      Check the active session contract; exits 1 when incomplete
+  techybara run <check-id>       Run one named check (from .techybara/config.json "checks") and record scoped evidence
+  techybara next [--json]        Show which named checks are fresh vs. stale/failed/unknown/missing/partial
   techybara status               Explain whether TechyBara can run here (git present, in a repo, etc.)
 
 Flags:
@@ -50,6 +59,8 @@ type CommandName =
   | "receipt"
   | "contract"
   | "verify"
+  | "run"
+  | "next"
   | "status";
 
 const COMMANDS: readonly CommandName[] = [
@@ -60,6 +71,8 @@ const COMMANDS: readonly CommandName[] = [
   "receipt",
   "contract",
   "verify",
+  "run",
+  "next",
   "status",
 ];
 
@@ -102,6 +115,10 @@ export async function run(argv: readonly string[]): Promise<number> {
       return cmdContract(rest);
     case "verify":
       return cmdVerify(rest);
+    case "run":
+      return cmdRun(rest);
+    case "next":
+      return cmdNext(rest);
     case "status":
       return cmdStatus();
   }
@@ -544,6 +561,158 @@ async function cmdVerify(args: readonly string[]): Promise<number> {
     process.stdout.write(`✗ Completion contract incomplete — ${reason}\n`);
   }
   return 1;
+}
+
+/**
+ * Run one named check (from .techybara/config.json "checks") and record
+ * scoped v2 evidence. Thin by design: all execution/capture/persistence logic
+ * lives in report/execcheck.ts — this only resolves the check and prints.
+ */
+async function cmdRun(args: readonly string[]): Promise<number> {
+  const checkId = args[0];
+  if (!checkId || checkId.startsWith("--")) {
+    process.stderr.write(`techybara: usage: techybara run <check-id> [--session <id>]\n`);
+    return 2;
+  }
+  const rest = args.slice(1);
+  const invalid = invalidFlags(rest, ["--session"], []);
+  if (invalid) {
+    process.stderr.write(`techybara: usage: techybara run <check-id> [--session <id>]\n`);
+    return 2;
+  }
+
+  const cwd = process.cwd();
+  const top = await getToplevel(cwd);
+  if (!top) {
+    process.stderr.write(`techybara: not a git repository\n`);
+    return 2;
+  }
+
+  const { checks, issues } = loadCheckDefinitions(top);
+  const issue = issues.find((i) => i.id === checkId);
+  if (issue) {
+    process.stderr.write(`techybara: ${issue.issue}\n`);
+    return 2;
+  }
+  const check = checks.find((c) => c.id === checkId);
+  if (!check) {
+    process.stderr.write(`techybara: unknown check "${checkId}"\n`);
+    return 2;
+  }
+
+  const sessionId = await resolveSessionId(cwd, flagValue(rest, "--session"));
+  const outcome = await runCheck(top, sessionId, check);
+  switch (outcome.kind) {
+    case "config-error":
+      process.stderr.write(`techybara: ${outcome.message}\n`);
+      return 2;
+    case "storage-error":
+      process.stderr.write(`techybara: ${outcome.message}\n`);
+      return 1;
+    case "executed":
+      process.stdout.write(`${outcome.summary}\n`);
+      if (outcome.note) process.stdout.write(`  ${outcome.note}\n`);
+      return outcome.cliExitCode;
+  }
+}
+
+/**
+ * Show which named checks are still fresh vs. which need attention. Read-only:
+ * captures current scope and reads existing evidence, writes nothing.
+ */
+async function cmdNext(args: readonly string[]): Promise<number> {
+  const invalid = invalidFlags(args, ["--session"], ["--json"]);
+  if (invalid) {
+    process.stderr.write(`techybara: usage: techybara next [--json] [--session <id>]\n`);
+    return 2;
+  }
+  const json = args.includes("--json");
+  const cwd = process.cwd();
+  const top = await getToplevel(cwd);
+  if (!top) {
+    process.stderr.write(`techybara: not a git repository\n`);
+    return 2;
+  }
+
+  const sessionId = await resolveSessionId(cwd, flagValue(args, "--session"));
+  const { checks, issues } = loadCheckDefinitions(top);
+  const results = evaluateNamedChecks(top, sessionId, checks);
+  const issueResults: FreshnessResult[] = issues.map((i) => ({
+    checkId: i.id,
+    category: "",
+    command: "",
+    cwd: "",
+    state: "partial",
+    reason: i.issue,
+  }));
+  const all = [...results, ...issueResults];
+
+  const summary: Record<FreshnessState, number> = {
+    fresh: 0,
+    stale: 0,
+    failed: 0,
+    unknown: 0,
+    partial: 0,
+    missing: 0,
+  };
+  for (const r of all) summary[r.state]++;
+  const ready = all.length > 0 && all.every((r) => r.state === "fresh");
+
+  if (json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          version: 1,
+          ready,
+          checks: all.map((r) => ({
+            checkId: r.checkId,
+            state: r.state,
+            ...(r.invalidatedBy ? { invalidatedBy: r.invalidatedBy } : {}),
+            ...(r.reason ? { reason: r.reason } : {}),
+            command: r.command,
+            cwd: r.cwd,
+          })),
+          summary,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return all.length === 0 ? 0 : ready ? 0 : 1;
+  }
+
+  if (all.length === 0) {
+    process.stdout.write(
+      `🦫 No named checks configured. Add one under "checks" in .techybara/config.json.\n`,
+    );
+    return 0;
+  }
+
+  const attention = all.length - summary.fresh;
+  process.stdout.write(
+    `🦫 ${summary.fresh}/${all.length} checks fresh${attention > 0 ? ` · ${attention} require attention` : ""}\n\n`,
+  );
+  for (const r of all) {
+    if (r.state === "fresh") continue;
+    process.stdout.write(`${r.state.toUpperCase()} ${r.checkId}\n`);
+    if (r.invalidatedBy && r.invalidatedBy.length > 0) {
+      process.stdout.write(
+        `  Cause: ${r.invalidatedBy.map((e) => `${e.path} ${e.kind}`).join(", ")}\n`,
+      );
+    } else if (r.reason) {
+      process.stdout.write(`  Cause: ${r.reason}\n`);
+    }
+    if (r.command) {
+      process.stdout.write(`  Run: ${r.command}${r.cwd !== "." ? ` (in ${r.cwd})` : ""}\n`);
+    }
+    process.stdout.write(`\n`);
+  }
+  const freshIds = all.filter((r) => r.state === "fresh").map((r) => r.checkId);
+  if (freshIds.length > 0) {
+    process.stdout.write(`Still fresh:\n`);
+    for (const id of freshIds) process.stdout.write(`  ${id}\n`);
+  }
+  return ready ? 0 : 1;
 }
 
 /** Manual diagnostic: can TechyBara run here, and are the hooks healthy? */
