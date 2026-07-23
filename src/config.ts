@@ -190,7 +190,7 @@ const SCOPE_EXCLUDED_DIRS = new Set([
 ]);
 
 /** True when a glob's literal (non-wildcard) path segments name an excluded directory. */
-function targetsExcludedDir(glob: string): boolean {
+export function targetsExcludedDir(glob: string): boolean {
   return glob
     .split("/")
     .some((segment) => segment !== "**" && segment !== "*" && SCOPE_EXCLUDED_DIRS.has(segment));
@@ -206,7 +206,7 @@ function normalizeRepoRelativeDir(raw: unknown): string | null {
   return parts.length === 0 ? "." : parts.join("/");
 }
 
-function normalizeScopeGlob(raw: unknown): string | null {
+export function normalizeScopeGlob(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const posix = raw.replace(/\\/g, "/").trim();
   if (posix.length === 0) return null;
