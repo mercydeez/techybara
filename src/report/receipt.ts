@@ -141,8 +141,11 @@ const CATEGORY_RULES: readonly (readonly [VerificationCategory, RegExp])[] = [
  * Keep only unquoted shell syntax and strip comments. This is not an executor
  * or a full shell parser; it is a one-way safety filter. Nested commands passed
  * as quoted strings are deliberately not classified.
+ *
+ * Exported so config.ts can apply the same masking analysis to a configured
+ * check's command at validation time — one classifier, not two.
  */
-function shellCode(command: string): string {
+export function shellCode(command: string): string {
   let out = "";
   let quote: "'" | '"' | null = null;
   for (let i = 0; i < command.length; i++) {
@@ -220,7 +223,7 @@ const NON_MASKING = [
  * tool. Anything we cannot confirm came from that tool is reported
  * "unconfirmed-shell" rather than judged by these rules. See docs/shells.md.
  */
-function maskReason(cmd: string): UnknownReason | null {
+export function maskReason(cmd: string): UnknownReason | null {
   // Scan with the provably-safe constructs removed, then treat ANY remaining
   // shell metacharacter as masking. Blacklisting them one at a time loses.
   const neutral = NON_MASKING.reduce<string>((s, re) => s.replace(re, " "), cmd);

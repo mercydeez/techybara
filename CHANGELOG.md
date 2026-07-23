@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-23
+
+### Added
+- **Verification freshness for named checks.** Define checks under `checks` in
+  `.techybara/config.json` (`id`, `category`, `command`, `cwd`, `inputs`,
+  `invalidators`); run one with `techybara run <check-id>`, and see which are
+  still trustworthy with `techybara next [--json]`. Freshness is decided by an
+  exact, content-derived manifest of each check's scoped files — never by git
+  history — and is valid only within the current TechyBara session. Six
+  states: `fresh`, `stale`, `failed`, `unknown`, `partial`, `missing`. A
+  `fresh` result proves the scoped content is unchanged since the last
+  trustworthy pass; it does not prove the code is correct. An empty scope (a
+  typo'd glob, or paths that don't exist yet) fails closed to `partial` rather
+  than reporting a vacuous `fresh`. Symlinked scope matches are unsupported in
+  this release and also fail closed to `partial`. `next` prints each check's
+  configured command text so it can be re-run — do not put literal secrets in
+  a check `command`; use environment variables instead.
+
 ## [0.3.0] - 2026-07-17
 
 ### Added
@@ -231,7 +249,8 @@ no change attribution, symlinks skipped in the protected scan, and more). See
 [What TechyBara cannot see](./README.md#what-techybara-cannot-see) rather than
 duplicating them here.
 
-[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mercydeez/techybara/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mercydeez/techybara/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mercydeez/techybara/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/mercydeez/techybara/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mercydeez/techybara/compare/v0.1.1...v0.2.0

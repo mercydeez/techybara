@@ -399,6 +399,84 @@ out of the box:
 
 Globs support `*` (within a path segment), `**` (across segments), and `?`.
 
+## Named checks (verification freshness)
+
+Optional. Named checks let you run a verification command once and know, later,
+whether its result is still trustworthy — without re-running it — by comparing the
+**exact bytes** of the files it depends on. Add them under `checks` in
+`.techybara/config.json`:
+
+```json
+{
+  "checks": [
+    {
+      "id": "frontend:test",
+      "category": "test",
+      "command": "npm test -- --run",
+      "cwd": ".",
+      "inputs": ["frontend/src/**", "frontend/package.json"],
+      "invalidators": ["tsconfig.json"]
+    }
+  ]
+}
+```
+
+- **`id`** — unique, non-empty.
+- **`category`** — one of the verification categories (`test`, `typecheck`, `lint`,
+  `build`, `format`, `package`).
+- **`command`** — the shell command to run. Its shape must let TechyBara trust the
+  exit status, so masking constructs (`|| true`, pipelines, `;`, `&`, command
+  substitution, …) are **rejected at load time** — a zero exit from an ambiguous
+  command must never look like a trustworthy pass.
+- **`cwd`** — repo-relative working directory (default `.`). Absolute paths, drive
+  letters, and `..` are rejected.
+- **`inputs`** — repo-relative globs whose file contents define the check's scope.
+  **At least one is required, and it must actually match files at run time** (see
+  the empty-scope note below).
+- **`invalidators`** — optional extra globs that also invalidate the result when
+  their content changes.
+
+Two commands drive it:
+
+```bash
+techybara run <check-id>    # run the check and record scoped evidence
+techybara next [--json]     # show which checks are still fresh vs. need attention
+```
+
+`next` reports one of six states per check:
+
+| State | Meaning |
+| --- | --- |
+| `fresh` | Same session, trustworthy pass, and every scoped file is byte-identical to when it passed. |
+| `stale` | A scoped file changed (added/modified/deleted) since the last pass — re-run it. |
+| `failed` | The last recorded run exited non-zero. |
+| `unknown` | The last run's status couldn't be trusted (interrupted, or it edited its own scope while running). |
+| `partial` | Evidence or scope couldn't be captured completely (corrupt record, different session, symlinked or oversized inputs, **or a scope that matched no files**). |
+| `missing` | The check has never run in this session. |
+
+`next` exits `0` only when every configured check is `fresh` (and at least one exists);
+otherwise it exits `1`. With no `checks` configured it prints a notice and exits `0`
+— it never implies the repository is verified.
+
+Things to know before you rely on it:
+
+- **`fresh` proves the scope is unchanged, not that the code is correct.** It means
+  "nothing this check depends on has changed since it last passed" — no more.
+- **Validity is session-only.** Evidence from another Claude Code session never counts
+  as fresh; it reports `partial`.
+- **Git history is never consulted.** An unrelated commit that doesn't touch a check's
+  scoped files leaves it fresh; freshness is pure content equality.
+- **Empty scope fails closed.** A glob that matches no files (a typo, or paths that
+  don't exist yet) is treated as `partial`, never `fresh` — so a misconfigured check
+  can't silently report green forever.
+- **Symlinked or oversized inputs fail closed.** A matching symlink is never followed
+  or hashed, and files over the size cap can't be hashed exactly; either downgrades the
+  capture to `partial`.
+- **`next` prints each check's configured command** (in both the human and `--json`
+  output) so you can re-run it. Evidence records never store command text, but this
+  output does echo it — **don't embed secrets in a check `command`; pass them via
+  environment variables instead.**
+
 ## How it works
 
 ```text
