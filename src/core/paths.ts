@@ -80,6 +80,26 @@ export function errorLogPath(top: string): string {
   return join(stateDir(top), "error.log");
 }
 
+// --- Scope Guard task state -------------------------------------------------
+
+/** Single active-task pointer for the repository. */
+export function activeTaskPath(top: string): string {
+  return join(stateDir(top), "task.json");
+}
+
+export function tasksDir(top: string): string {
+  return join(stateDir(top), "tasks");
+}
+
+export function taskDir(top: string, taskId: string): string {
+  return join(tasksDir(top), safeSessionId(taskId));
+}
+
+/** Full-universe filesystem manifest captured when a task starts. */
+export function taskBaselinePath(top: string, taskId: string): string {
+  return join(taskDir(top, taskId), "baseline.json");
+}
+
 /** One v2 evidence file per named check — see report/evidence.ts. */
 export function evidenceDir(top: string, sessionId: string): string {
   return join(sessionDir(top, sessionId), "evidence");

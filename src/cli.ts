@@ -25,6 +25,7 @@ import {
   readHookInput,
 } from "./hooks/adapter.js";
 import { runReport } from "./report/run.js";
+import { readActiveTask, startTask } from "./core/task.js";
 import { classifyCommand, writeReceipt, type VerificationCategory } from "./report/receipt.js";
 import { buildJsonError, buildJsonReport } from "./report/json.js";
 import { runCheck } from "./report/execcheck.js";
@@ -43,6 +44,8 @@ Usage:
   techybara verify [--json]      Check the active session contract; exits 1 when incomplete
   techybara run <check-id>       Run one named check (from .techybara/config.json "checks") and record scoped evidence
   techybara next [--json]        Show which named checks are fresh vs. stale/failed/unknown/missing/partial
+  techybara task start …         Start a Scope Guard task with approved path rules (--allow/--review/--deny)
+  techybara task status [--json] Show the active task and its rules
   techybara status               Explain whether TechyBara can run here (git present, in a repo, etc.)
 
 Flags:
@@ -61,6 +64,7 @@ type CommandName =
   | "verify"
   | "run"
   | "next"
+  | "task"
   | "status";
 
 const COMMANDS: readonly CommandName[] = [
@@ -73,6 +77,7 @@ const COMMANDS: readonly CommandName[] = [
   "verify",
   "run",
   "next",
+  "task",
   "status",
 ];
 
@@ -119,6 +124,8 @@ export async function run(argv: readonly string[]): Promise<number> {
       return cmdRun(rest);
     case "next":
       return cmdNext(rest);
+    case "task":
+      return cmdTask(rest);
     case "status":
       return cmdStatus();
   }
@@ -713,6 +720,159 @@ async function cmdNext(args: readonly string[]): Promise<number> {
     for (const id of freshIds) process.stdout.write(`  ${id}\n`);
   }
   return ready ? 0 : 1;
+}
+
+/** Scope Guard task lifecycle: `task start` and `task status`. */
+async function cmdTask(args: readonly string[]): Promise<number> {
+  const sub = args[0];
+  if (sub === "start") return cmdTaskStart(args.slice(1));
+  if (sub === "status") return cmdTaskStatus(args.slice(1));
+  process.stderr.write(
+    `techybara: usage: techybara task <start|status>\n` +
+      `  task start --title <t> --allow <glob> [--allow …] [--review <glob> …] [--deny <glob> …] [--id <id>] [--force]\n` +
+      `  task status [--json]\n`,
+  );
+  return 2;
+}
+
+const TASK_START_USAGE =
+  `techybara: usage: techybara task start --title <t> --allow <glob> [--allow …] [--review <glob> …] [--deny <glob> …] [--id <id>] [--force]\n`;
+
+async function cmdTaskStart(args: readonly string[]): Promise<number> {
+  let title: string | undefined;
+  let id: string | undefined;
+  let force = false;
+  const allow: string[] = [];
+  const review: string[] = [];
+  const deny: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--force") {
+      force = true;
+      continue;
+    }
+    if (a === "--title" || a === "--id" || a === "--allow" || a === "--review" || a === "--deny") {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) {
+        process.stderr.write(TASK_START_USAGE);
+        return 2;
+      }
+      i++;
+      if (a === "--title") title = v;
+      else if (a === "--id") id = v;
+      else if (a === "--allow") allow.push(v);
+      else if (a === "--review") review.push(v);
+      else deny.push(v);
+      continue;
+    }
+    process.stderr.write(`techybara: unexpected argument "${a}"\n${TASK_START_USAGE}`);
+    return 2;
+  }
+
+  if (title === undefined) {
+    process.stderr.write(TASK_START_USAGE);
+    return 2;
+  }
+
+  const top = await getToplevel(process.cwd());
+  if (!top) {
+    process.stderr.write(
+      (await gitAvailable())
+        ? `techybara: not a git repository\n`
+        : `techybara: git could not be run — TechyBara cannot start a task here\n`,
+    );
+    return 2;
+  }
+
+  const result = startTask(top, { title, allow, review, deny, id, force });
+  switch (result.kind) {
+    case "bad-title":
+      process.stderr.write(`techybara: --title is required and must be a single line of at most 200 characters\n`);
+      return 2;
+    case "no-allow":
+      process.stderr.write(`techybara: at least one --allow rule is required\n`);
+      return 2;
+    case "rule-error":
+      process.stderr.write(
+        `techybara: --${result.error.bucket} "${result.error.glob}" ${result.error.reason}\n`,
+      );
+      return 2;
+    case "active-exists":
+      process.stderr.write(
+        `techybara: a task is already active (${result.existingId}); use --force to replace it\n`,
+      );
+      return 2;
+    case "id-collision":
+      process.stderr.write(
+        `techybara: --id "${result.existingId}" is the currently active task; choose a different --id or omit it to replace with a fresh one\n`,
+      );
+      return 2;
+    case "incomplete-capture":
+      process.stderr.write(`techybara: could not capture an exact workspace baseline; task not created\n`);
+      for (const d of result.capture.diagnostics) process.stderr.write(`  • ${d}\n`);
+      return 2;
+    case "too-large":
+      process.stderr.write(`techybara: the workspace baseline exceeds the size limit; task not created\n`);
+      return 2;
+    case "storage-error":
+      process.stderr.write(`techybara: could not write task state: ${result.message}\n`);
+      return 2;
+    case "ok": {
+      const t = result.task;
+      process.stdout.write(`🦫 Task started: ${t.title}\n`);
+      process.stdout.write(`  id:       ${t.taskId}\n`);
+      process.stdout.write(`  session:  ${t.sessionId}\n`);
+      process.stdout.write(
+        `  rules:    ${t.rules.allow.length} allow · ${t.rules.review.length} review · ${t.rules.deny.length} deny\n`,
+      );
+      process.stdout.write(`  baseline: ${t.baseline.filesObserved} files captured (exact)\n`);
+      return 0;
+    }
+  }
+}
+
+async function cmdTaskStatus(args: readonly string[]): Promise<number> {
+  const invalid = invalidFlags(args, [], ["--json"]);
+  if (invalid) {
+    process.stderr.write(`techybara: usage: techybara task status [--json]\n`);
+    return 2;
+  }
+  const json = args.includes("--json");
+
+  const top = await getToplevel(process.cwd());
+  if (!top) {
+    if (json) process.stdout.write(JSON.stringify({ version: 1, active: false }, null, 2) + "\n");
+    else process.stderr.write(`techybara: not a git repository\n`);
+    return 2;
+  }
+
+  const task = readActiveTask(top);
+  if (!task) {
+    if (json) {
+      process.stdout.write(JSON.stringify({ version: 1, active: false }, null, 2) + "\n");
+    } else {
+      process.stderr.write(
+        `techybara: no active task; start one with: techybara task start --title "…" --allow "src/**"\n`,
+      );
+    }
+    return 2;
+  }
+
+  if (json) {
+    process.stdout.write(JSON.stringify({ version: 1, active: true, task }, null, 2) + "\n");
+    return 0;
+  }
+
+  process.stdout.write(`🦫 Active task: ${task.title}\n`);
+  process.stdout.write(`  id:        ${task.taskId}\n`);
+  process.stdout.write(`  session:   ${task.sessionId}\n`);
+  process.stdout.write(`  started:   ${task.startedAt}\n`);
+  process.stdout.write(`  baseline:  ${task.baseline.filesObserved} files (${task.baseline.quality})\n`);
+  for (const g of task.rules.allow) process.stdout.write(`  allow  +   ${g}\n`);
+  for (const g of task.rules.review) process.stdout.write(`  review ~   ${g}\n`);
+  for (const g of task.rules.deny) process.stdout.write(`  deny   ✗   ${g}\n`);
+  return 0;
 }
 
 /** Manual diagnostic: can TechyBara run here, and are the hooks healthy? */
